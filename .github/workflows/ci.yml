@@ -1,0 +1,94 @@
+name: Meta CI
+
+on:
+  workflow_call:
+    inputs:
+      python-version:
+        description: "Python version to use for setup-python steps (numpydoc job only; other jobs get their interpreter via uv)."
+        type: string
+        default: "3.13"
+      package-dir:
+        description: "Top-level package directory to lint with numpydoc, e.g. 'qcore', 'workflow', 'IM'."
+        type: string
+        required: true
+      system-packages:
+        description: "Space-separated apt packages to install before deptry/pytest/typecheck jobs (e.g. 'gmt libgmt-dev ghostscript')."
+        type: string
+        default: ""
+      uv-extra-args:
+        description: "Extra flags passed to 'uv sync' (e.g. '--all-extras --dev' or '--all-groups --all-extras')."
+        type: string
+        default: "--all-extras --dev"
+      numpydoc-extra-excludes:
+        description: "Extra '-E' fdfind exclude fragments for numpydoc lint, e.g. '-E ccldpy.py'. __init__.py is always excluded."
+        type: string
+        default: ""
+
+jobs:
+  ruff:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: ruff check
+        uses: astral-sh/ruff-action@v4.1.0
+        with:
+          version-file: "uv.lock"
+      - name: ruff format --check
+        uses: astral-sh/ruff-action@v4.1.0
+        with:
+          version-file: "uv.lock"
+          args: "format --check"
+
+  deptry:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "**/pyproject.toml"
+      - if: inputs.system-packages != ''
+        run: sudo apt-get update && sudo apt-get install -y ${{ inputs.system-packages }}
+      - run: uv sync ${{ inputs.uv-extra-args }}
+      - run: uv run deptry .
+
+  numpydoc-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: awalsh128/cache-apt-pkgs-action@latest
+        with:
+          packages: fd-find
+          version: "1.0"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+      - run: pip install numpydoc
+      - run: >
+          fdfind . ${{ inputs.package-dir }}/ -E "__init__.py"
+          ${{ inputs.numpydoc-extra-excludes }} --extension py | xargs numpydoc lint
+
+  pytest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - if: inputs.system-packages != ''
+        run: sudo apt-get update && sudo apt-get install -y ${{ inputs.system-packages }}
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "**/pyproject.toml"
+      - run: uv sync ${{ inputs.uv-extra-args }}
+      - run: uv run pytest tests
+
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - if: inputs.system-packages != ''
+        run: sudo apt-get update && sudo apt-get install -y ${{ inputs.system-packages }}
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync ${{ inputs.uv-extra-args }}
+      - run: uv run ty check
