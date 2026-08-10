@@ -23,6 +23,18 @@ on:
         description: "Extra '-E' fdfind exclude fragments for numpydoc lint, e.g. '-E ccldpy.py'. __init__.py is always excluded."
         type: string
         default: ""
+      enable-coverage:
+        description: "When true, run pytest with coverage and gate on cov-fail-under."
+        type: boolean
+        default: false
+      cov-package:
+        description: "Package name passed to '--cov='. Required when enable-coverage is true."
+        type: string
+        default: ""
+      cov-fail-under:
+        description: "Coverage percentage threshold passed to 'coverage report --fail-under='."
+        type: number
+        default: 95
 
 jobs:
   ruff:
@@ -79,7 +91,24 @@ jobs:
           enable-cache: true
           cache-dependency-glob: "**/pyproject.toml"
       - run: uv sync ${{ inputs.uv-extra-args }}
-      - run: uv run pytest tests
+      - name: Run tests
+        if: ${{ !inputs.enable-coverage }}
+        run: uv run pytest tests
+      - name: Run tests with coverage
+        if: ${{ inputs.enable-coverage }}
+        run: uv run pytest --cov=${{ inputs.cov-package }} --cov-report=html tests
+      - name: Report and gate coverage
+        if: ${{ inputs.enable-coverage }}
+        run: |
+          uv run coverage html --skip-covered --skip-empty
+          uv run coverage report | sed 's/^/    /' >> $GITHUB_STEP_SUMMARY
+          uv run coverage report --fail-under=${{ inputs.cov-fail-under }}
+      - name: Upload HTML report if coverage check failed
+        if: ${{ inputs.enable-coverage && failure() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: html-report
+          path: htmlcov
 
   typecheck:
     runs-on: ubuntu-latest
