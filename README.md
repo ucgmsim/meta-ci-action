@@ -46,12 +46,4 @@ jobs:
   `--cov` flags or coverage threshold. Repos that want coverage enforcement
   keep their own separate workflow for it.
 
-## Dependabot
-
-`.github/dependabot.yml` watches the `github-actions` ecosystem but is scoped
-via `allow` to only `astral-sh/ruff-action` — other actions used in `ci.yml`
-(`actions/checkout`, `astral-sh/setup-uv`, `actions/setup-python`,
-`awalsh128/cache-apt-pkgs-action`) are intentionally left unmanaged so ruff
-version bumps don't get lost in unrelated action-update noise.
-
 
