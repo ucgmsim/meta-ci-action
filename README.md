@@ -1,10 +1,13 @@
 # meta-ci-action
 
-Shared, reusable GitHub Actions CI workflow for `ucgmsim` Python repos. Runs
-`ruff` (check + format), `deptry`, `numpydoc` lint, `pytest`, and `ty`
-(type checking) as five parallel jobs.
+Shared, reusable GitHub Actions workflows for `ucgmsim` Python repos:
 
-## Usage
+- **`ci.yml`** — `ruff` (check + format), `deptry`, `numpydoc` lint, `pytest`,
+  and `ty` (type checking) as five parallel jobs.
+- **`claude-review.yml`** — an on-demand Claude PR review, triggered by a
+  `@claude review` comment (never automatically on PR open/push).
+
+## Usage: CI
 
 In the consuming repo, replace the repo's own `ruff.yml`, `deptry.yml`,
 `numpydoc.yml`, `pytest.yml`, and `types.yml` workflows with a single file,
@@ -40,6 +43,32 @@ jobs:
 | `cov-package` | `""` | Package name passed to `--cov=`. Required when `enable-coverage` is true. |
 | `cov-fail-under` | `95` | Coverage percentage threshold passed to `coverage report --fail-under=`. |
 
+## Usage: Claude PR review
+
+`claude-review.yml` is a `workflow_call`-only reusable workflow — it has no
+trigger of its own. Each consuming repo needs its own thin wrapper carrying
+the actual `issue_comment` trigger, e.g. `.github/workflows/claude-review.yml`:
+
+```yaml
+name: Claude PR Review
+
+on:
+  issue_comment:
+    types: [created]
+
+jobs:
+  review:
+    uses: ucgmsim/meta-ci-action/.github/workflows/claude-review.yml@v1
+    secrets:
+      claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+```
+
+The reusable workflow itself gates on `contains(github.event.comment.body,
+'@claude review')` and only runs on PR comments — it does not run on PR
+creation, push, or any other event. `CLAUDE_CODE_OAUTH_TOKEN` must be set as
+a secret in the consuming repo (or its org) and passed through explicitly,
+since reusable workflows don't inherit secrets automatically unless declared.
+
 ## Design principles
 
 - **Args live in `pyproject.toml`, not the workflow.** Tool behavior (ruff
@@ -72,4 +101,7 @@ jobs:
    Leave anything unrelated to these five tools untouched.
 5. **Validate before merging.** Open a draft PR and confirm each job passes
    (or fails the same way the old workflow did) before relying on it.
+
+Adopting `claude-review.yml` is independent of the above — it's a separate
+opt-in workflow, not part of the `ci.yml` migration.
 

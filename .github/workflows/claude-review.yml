@@ -1,0 +1,61 @@
+name: Claude PR Review
+
+# Reusable workflow — the actual "@claude review" trigger lives in each
+# consuming repo's own thin wrapper (on: issue_comment), NOT here. This file
+# only runs when called via `uses:` from that wrapper.
+on:
+  workflow_call:
+    secrets:
+      claude_code_oauth_token:
+        required: true
+
+# A second "@claude review" cancels the in-flight one instead of running both.
+concurrency:
+  group: claude-review-${{ github.event.issue.number }}
+  cancel-in-progress: true
+
+jobs:
+  review:
+    # Only PR comments, only when explicitly asked.
+    if: >
+      github.event.issue.pull_request &&
+      contains(github.event.comment.body, '@claude review')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read          # read-only: this bot reviews, it does not push
+      pull-requests: write    # post review comments
+      issues: write           # post the tracking comment
+      id-token: write         # required for Claude GitHub App auth
+      actions: read           # let Claude read CI results
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0      # full history; the action checks out the PR head itself
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.claude_code_oauth_token }}
+          track_progress: true
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.issue.number }}
+
+            Review this pull request for correctness bugs: logic errors,
+            security vulnerabilities, broken edge cases, and regressions.
+            Prioritise defects over style. Follow REVIEW.md and CLAUDE.md
+            if present in the repo.
+
+            First, read the existing review comments on this PR. This may be a
+            repeat review — do not re-report findings you already posted that
+            are still unaddressed, and do not restate findings the author has
+            already replied to. Report only what is new or newly broken.
+
+            Use `mcp__github_inline_comment__create_inline_comment` with
+            `confirmed: true` for line-specific findings. Post a short summary
+            comment with the finding count by severity. Do not modify code,
+            do not push commits, do not approve or request changes.
+          claude_args: |
+            --model claude-sonnet-5
+            --max-turns 40
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Bash(git log:*),Bash(git diff:*)"
