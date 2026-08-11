@@ -9,17 +9,16 @@ on:
       claude_code_oauth_token:
         required: true
 
-# A second "@claude review" cancels the in-flight one instead of running both.
-concurrency:
-  group: claude-review-${{ github.event.issue.number }}
-  cancel-in-progress: true
-
 jobs:
   review:
     # Only PR comments, only when explicitly asked.
     if: >
       github.event.issue.pull_request &&
       contains(github.event.comment.body, '@claude review')
+    # A second "@claude review" cancels the in-flight one instead of running both. 
+    concurrency:
+      group: claude-review-${{ github.event.issue.number }}
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
