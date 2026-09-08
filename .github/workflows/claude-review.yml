@@ -32,7 +32,15 @@ jobs:
         with:
           fetch-depth: 0      # full history; the action checks out the PR head itself
 
-      - uses: anthropics/claude-code-action@v1
+      # Pinned to v1.0.217 rather than @v1. v1.0.218 (0d0e087) bumped the
+      # bundled Claude Code to 2.1.265, whose installer exits 0 and prints
+      # "successfully installed" while leaving no launcher at
+      # ~/.local/bin/claude, so every run dies before Claude starts with
+      # "native binary not found". Because the install reports success the
+      # action's retry loop never fires.
+      # Upstream: anthropics/claude-code-action#1817 — revisit once it ships
+      # a fix (verify the launcher exists post-install) and drop this pin.
+      - uses: anthropics/claude-code-action@9c5ddab2e6d17b83ea679153b31f1d5f023cf636 # v1.0.217
         with:
           claude_code_oauth_token: ${{ secrets.claude_code_oauth_token }}
           track_progress: true
