@@ -16,11 +16,19 @@ on:
         type: string
         default: ""
       uv-extra-args:
-        description: "Extra flags passed to 'uv sync' (e.g. '--all-extras --dev' or '--all-groups --all-extras')."
+        description: "Extra flags passed to 'uv sync' (e.g. '--all-extras --dev' or '--all-groups --all-extras'). Maturin repos can add '-C build-args=--profile=dev' here to skip optimised Rust builds."
         type: string
         default: "--all-extras --dev"
       numpydoc-extra-excludes:
         description: "Extra '-E' fdfind exclude fragments for numpydoc lint, e.g. '-E ccldpy.py'. __init__.py is always excluded."
+        type: string
+        default: ""
+      pytest-paths:
+        description: "Paths passed to pytest. Leave empty to let '[tool.pytest.ini_options] testpaths' decide."
+        type: string
+        default: "tests"
+      rust-features:
+        description: "Space-separated cargo feature sets; each gets its own 'cargo test --features <set>' run. Only used when a Cargo.toml is present."
         type: string
         default: ""
       enable-coverage:
@@ -37,6 +45,24 @@ on:
         default: 95
 
 jobs:
+  # Gate for the Rust jobs and steps below. hashFiles() is not available in a
+  # job-level `if:`, so presence of a Cargo.toml is detected in a real job and
+  # published as an output. Pure-Python repos pay one ~10s no-op job for this.
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      has-rust: ${{ steps.cargo.outputs.has-rust }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: cargo
+        shell: bash
+        run: |
+          if [ -n "$(find . -name Cargo.toml -not -path './target/*' -print -quit)" ]; then
+            echo "has-rust=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has-rust=false" >> "$GITHUB_OUTPUT"
+          fi
+
   ruff:
     runs-on: ubuntu-latest
     steps:
@@ -52,9 +78,14 @@ jobs:
           args: "format --check"
 
   deptry:
+    needs: detect
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - if: needs.detect.outputs.has-rust == 'true'
+        uses: dtolnay/rust-toolchain@stable
+      - if: needs.detect.outputs.has-rust == 'true'
+        uses: Swatinem/rust-cache@v2
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
@@ -62,7 +93,7 @@ jobs:
       - if: inputs.system-packages != ''
         run: sudo apt-get update && sudo apt-get install -y ${{ inputs.system-packages }}
       - run: uv sync ${{ inputs.uv-extra-args }}
-      - run: uv run deptry .
+      - run: uv run --no-sync deptry .
 
   numpydoc-lint:
     runs-on: ubuntu-latest
@@ -80,12 +111,50 @@ jobs:
           fdfind . ${{ inputs.package-dir }}/ -E "__init__.py"
           ${{ inputs.numpydoc-extra-excludes }} --extension py | xargs numpydoc lint
 
-  pytest:
+  # Rust equivalent of the ruff/pytest/typecheck jobs: only runs for repos that
+  # actually ship a crate.
+  rust:
+    needs: detect
+    if: needs.detect.outputs.has-rust == 'true'
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - if: inputs.system-packages != ''
+        run: sudo apt-get update && sudo apt-get install -y ${{ inputs.system-packages }}
+      - name: cargo fmt --check
+        run: cargo fmt --all --check
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: cargo test
+        run: cargo test
+      - name: cargo test (extra feature sets)
+        if: inputs.rust-features != ''
+        env:
+          RUST_FEATURES: ${{ inputs.rust-features }}
+        run: |
+          for feature_set in $RUST_FEATURES; do
+            cargo test --features "$feature_set"
+          done
+      - name: cargo doc-tests
+        run: cargo test --doc
+
+  pytest:
+    needs: detect
+    runs-on: ubuntu-latest
+    env:
+      PYTEST_PATHS: ${{ inputs.pytest-paths }}
     steps:
       - uses: actions/checkout@v4
       - if: inputs.system-packages != ''
         run: sudo apt-get update && sudo apt-get install -y ${{ inputs.system-packages }}
+      - if: needs.detect.outputs.has-rust == 'true'
+        uses: dtolnay/rust-toolchain@stable
+      - if: needs.detect.outputs.has-rust == 'true'
+        uses: Swatinem/rust-cache@v2
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
@@ -93,16 +162,16 @@ jobs:
       - run: uv sync ${{ inputs.uv-extra-args }}
       - name: Run tests
         if: ${{ !inputs.enable-coverage }}
-        run: uv run pytest tests
+        run: uv run --no-sync pytest $PYTEST_PATHS
       - name: Run tests with coverage
         if: ${{ inputs.enable-coverage }}
-        run: uv run pytest --cov=${{ inputs.cov-package }} --cov-report=html tests
+        run: uv run --no-sync pytest --cov=${{ inputs.cov-package }} --cov-report=html $PYTEST_PATHS
       - name: Report and gate coverage
         if: ${{ inputs.enable-coverage }}
         run: |
-          uv run coverage html --skip-covered --skip-empty
-          uv run coverage report | sed 's/^/    /' >> $GITHUB_STEP_SUMMARY
-          uv run coverage report --fail-under=${{ inputs.cov-fail-under }}
+          uv run --no-sync coverage html --skip-covered --skip-empty
+          uv run --no-sync coverage report | sed 's/^/    /' >> $GITHUB_STEP_SUMMARY
+          uv run --no-sync coverage report --fail-under=${{ inputs.cov-fail-under }}
       - name: Upload HTML report if coverage check failed
         if: ${{ inputs.enable-coverage && failure() }}
         uses: actions/upload-artifact@v4
@@ -111,13 +180,18 @@ jobs:
           path: htmlcov
 
   typecheck:
+    needs: detect
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - if: inputs.system-packages != ''
         run: sudo apt-get update && sudo apt-get install -y ${{ inputs.system-packages }}
+      - if: needs.detect.outputs.has-rust == 'true'
+        uses: dtolnay/rust-toolchain@stable
+      - if: needs.detect.outputs.has-rust == 'true'
+        uses: Swatinem/rust-cache@v2
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
       - run: uv sync ${{ inputs.uv-extra-args }}
-      - run: uv run ty check
+      - run: uv run --no-sync ty check

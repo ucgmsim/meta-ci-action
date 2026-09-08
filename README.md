@@ -3,7 +3,9 @@
 Shared, reusable GitHub Actions workflows for `ucgmsim` Python repos:
 
 - **`ci.yml`** — `ruff` (check + format), `deptry`, `numpydoc` lint, `pytest`,
-  and `ty` (type checking) as five parallel jobs.
+  and `ty` (type checking) as five parallel jobs, plus a `rust` job
+  (`cargo fmt`/`clippy`/`test`) that only appears for repos containing a
+  `Cargo.toml`.
 - **`claude-review.yml`** — an on-demand Claude PR review, triggered by a
   `@claude review` comment (never automatically on PR open/push).
 
@@ -39,9 +41,42 @@ jobs:
 | `system-packages` | `""` | Space-separated apt packages installed before the deptry/pytest/typecheck jobs (e.g. native libs like GMT or GDAL). |
 | `uv-extra-args` | `"--all-extras --dev"` | Extra flags passed to `uv sync` in the deptry/pytest/typecheck jobs. |
 | `numpydoc-extra-excludes` | `""` | Extra `-E` fdfind exclude fragments for numpydoc, e.g. `-E ccldpy.py`. `__init__.py` is always excluded. |
+| `pytest-paths` | `"tests"` | Paths passed to `pytest`. Set to `""` to fall through to `[tool.pytest.ini_options] testpaths`. |
+| `rust-features` | `""` | Space-separated cargo feature sets; each gets its own `cargo test --features <set>` run. Ignored when the repo has no `Cargo.toml`. |
 | `enable-coverage` | `false` | When true, runs pytest with `--cov=<cov-package>` and gates on `cov-fail-under`. |
 | `cov-package` | `""` | Package name passed to `--cov=`. Required when `enable-coverage` is true. |
 | `cov-fail-under` | `95` | Coverage percentage threshold passed to `coverage report --fail-under=`. |
+
+## Rust / maturin repos
+
+Nothing needs enabling. A `detect` job checks the repo out and looks for a
+`Cargo.toml`; when it finds one:
+
+- a `rust` job runs `cargo fmt --all --check`, `cargo clippy --all-targets -- -D
+  warnings`, `cargo test`, `cargo test --doc`, and one `cargo test --features
+  <set>` per entry in `rust-features`;
+- the `deptry`, `pytest` and `typecheck` jobs additionally install a stable
+  Rust toolchain and a `Swatinem/rust-cache@v2` cache, since `uv sync` has to
+  build the extension module in each of them.
+
+For a maturin project, put the build profile in `uv-extra-args` — otherwise
+every Python job compiles the crate with the release profile, which for a
+crate using `lto`/`codegen-units = 1` dominates the CI time:
+
+```yaml
+jobs:
+  ci:
+    uses: ucgmsim/meta-ci-action/.github/workflows/ci.yml@main
+    with:
+      package-dir: nzcvm
+      uv-extra-args: "--all-extras --dev -C build-args=--profile=dev"
+      rust-features: "high_precision"
+      pytest-paths: ""
+```
+
+Each job runs `uv sync` once and then `uv run --no-sync`, so the config
+settings applied at sync time are the ones the tests run against and no step
+silently rebuilds the crate.
 
 ## Usage: Claude PR review
 
