@@ -4,13 +4,13 @@ on:
   workflow_call:
     inputs:
       python-version:
-        description: "Python version to use for setup-python steps (numpydoc job only; other jobs get their interpreter via uv)."
+        description: "Python version to use for setup-python steps (docstring job only; other jobs get their interpreter via uv). It parses the code under test, so it must be at least as new as the syntax that code uses."
         type: string
         default: "3.13"
       package-dir:
-        description: "Top-level package directory to lint with numpydoc, e.g. 'qcore', 'workflow', 'IM'."
+        description: "Top-level package directory to lint for docstrings, e.g. 'qcore', 'workflow', 'IM'. Optional now that npdlint reads '[tool.npdlint] include' from pyproject.toml; leave it unset once that is configured."
         type: string
-        required: true
+        default: ""
       system-packages:
         description: "Space-separated apt packages to install before deptry/pytest/typecheck jobs (e.g. 'gmt libgmt-dev ghostscript')."
         type: string
@@ -20,9 +20,13 @@ on:
         type: string
         default: "--all-extras --dev"
       numpydoc-extra-excludes:
-        description: "Extra '-E' fdfind exclude fragments for numpydoc lint, e.g. '-E ccldpy.py'. __init__.py is always excluded."
+        description: "Deprecated. Extra '-E' fdfind exclude fragments, e.g. '-E ccldpy.py', kept working so callers written for the old pipeline need no edit; each becomes an npdlint '--extend-exclude'. Prefer '[tool.npdlint] extend-exclude' in pyproject.toml."
         type: string
         default: ""
+      exclude-init:
+        description: "Skip __init__.py in the docstring job, as the old fdfind pipeline always did. Set false once '[tool.npdlint]' owns the exclusions and you want them linted too."
+        type: boolean
+        default: true
       pytest-paths:
         description: "Paths passed to pytest. Leave empty to let '[tool.pytest.ini_options] testpaths' decide."
         type: string
@@ -95,21 +99,45 @@ jobs:
       - run: uv sync ${{ inputs.uv-extra-args }}
       - run: uv run --no-sync deptry .
 
+  # Docstrings, via npdlint. It walks the tree itself and reads its rules from
+  # [tool.npdlint], so the fd-find + xargs pipeline this used to be — and the
+  # apt install it needed — are gone. The job keeps its name so that branch
+  # protection rules naming it as a required check do not have to change.
   numpydoc-lint:
     runs-on: ubuntu-latest
+    env:
+      PACKAGE_DIR: ${{ inputs.package-dir }}
+      EXTRA_EXCLUDES: ${{ inputs.numpydoc-extra-excludes }}
+      EXCLUDE_INIT: ${{ inputs.exclude-init }}
     steps:
       - uses: actions/checkout@v4
-      - uses: awalsh128/cache-apt-pkgs-action@latest
-        with:
-          packages: fd-find
-          version: "1.0"
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ inputs.python-version }}
-      - run: pip install numpydoc
-      - run: >
-          fdfind . ${{ inputs.package-dir }}/ -E "__init__.py"
-          ${{ inputs.numpydoc-extra-excludes }} --extension py | xargs numpydoc lint
+      - run: pip install npdlint
+      - name: npdlint check
+        # The inputs are read from the environment rather than interpolated
+        # into the script, so a caller cannot inject shell through them.
+        run: |
+          args=()
+          if [ -n "$PACKAGE_DIR" ]; then
+            args+=("$PACKAGE_DIR")
+          fi
+          if [ "$EXCLUDE_INIT" = "true" ]; then
+            args+=(--extend-exclude "**/__init__.py")
+          fi
+          if [ -n "$EXTRA_EXCLUDES" ]; then
+            echo "::warning::numpydoc-extra-excludes is deprecated;" \
+              "move these patterns to [tool.npdlint] extend-exclude."
+            # fdfind spelled each exclusion '-E <pattern>'; npdlint takes the
+            # same gitignore-style pattern behind --extend-exclude.
+            for token in $EXTRA_EXCLUDES; do
+              if [ "$token" != "-E" ]; then
+                args+=(--extend-exclude "$token")
+              fi
+            done
+          fi
+          npdlint check "${args[@]}" --output-format github --statistics
 
   # Rust equivalent of the ruff/pytest/typecheck jobs: only runs for repos that
   # actually ship a crate.
