@@ -2,10 +2,10 @@
 
 Shared, reusable GitHub Actions workflows for `ucgmsim` Python repos:
 
-- **`ci.yml`** — `ruff` (check + format), `deptry`, `numpydoc` lint, `pytest`,
-  and `ty` (type checking) as five parallel jobs, plus a `rust` job
-  (`cargo fmt`/`clippy`/`test`) that only appears for repos containing a
-  `Cargo.toml`.
+- **`ci.yml`** — `ruff` (check + format), `deptry`, `npdlint`
+  (numpydoc-style docstrings), `pytest`, and `ty` (type checking) as five
+  parallel jobs, plus a `rust` job (`cargo fmt`/`clippy`/`test`) that only
+  appears for repos containing a `Cargo.toml`.
 - **`claude-review.yml`** — an on-demand Claude PR review, triggered by a
   `@claude review` comment (never automatically on PR open/push).
 
@@ -23,10 +23,10 @@ jobs:
   ci:
     uses: ucgmsim/meta-ci-action/.github/workflows/ci.yml@v1
     with:
-      package-dir: qcore
+      # package-dir: qcore          # unset once [tool.npdlint] has `include`
       # system-packages: "gmt libgmt-dev ghostscript"
       # uv-extra-args: "--all-groups --all-extras"
-      # numpydoc-extra-excludes: "-E ccldpy.py"
+      # exclude-init: false          # lint __init__.py too
       # enable-coverage: true
       # cov-package: qcore
       # cov-fail-under: 95
@@ -36,11 +36,12 @@ jobs:
 
 | Input | Default | Purpose |
 |---|---|---|
-| `python-version` | `"3.13"` | Interpreter version for the numpydoc job's `setup-python` step. |
-| `package-dir` | *(required)* | Top-level package directory numpydoc lints, e.g. `qcore`, `workflow`, `IM`. |
+| `python-version` | `"3.13"` | Interpreter version for the docstring job's `setup-python` step. It parses the code under test, so it must be at least as new as the syntax that code uses. |
+| `package-dir` | `""` | Top-level package directory to lint for docstrings, e.g. `qcore`, `workflow`, `IM`. No longer required: leave it unset once `[tool.npdlint] include` names the same paths. |
 | `system-packages` | `""` | Space-separated apt packages installed before the deptry/pytest/typecheck jobs (e.g. native libs like GMT or GDAL). |
 | `uv-extra-args` | `"--all-extras --dev"` | Extra flags passed to `uv sync` in the deptry/pytest/typecheck jobs. |
-| `numpydoc-extra-excludes` | `""` | Extra `-E` fdfind exclude fragments for numpydoc, e.g. `-E ccldpy.py`. `__init__.py` is always excluded. |
+| `numpydoc-extra-excludes` | `""` | **Deprecated.** Extra `-E` fdfind exclude fragments, e.g. `-E ccldpy.py`. Still honoured — each becomes an `npdlint --extend-exclude` — so a caller written for the old pipeline needs no edit, but `[tool.npdlint] extend-exclude` is the place for these now. |
+| `exclude-init` | `true` | Skip `__init__.py` in the docstring job, as the fdfind pipeline always did. Set `false` once `[tool.npdlint]` owns the exclusions and you want `__init__.py` linted too. |
 | `pytest-paths` | `"tests"` | Paths passed to `pytest`. Set to `""` to fall through to `[tool.pytest.ini_options] testpaths`. |
 | `rust-features` | `""` | Space-separated cargo feature sets; each gets its own `cargo test --features <set>` run. Ignored when the repo has no `Cargo.toml`. |
 | `enable-coverage` | `false` | When true, runs pytest with `--cov=<cov-package>` and gates on `cov-fail-under`. |
@@ -109,9 +110,11 @@ since reusable workflows don't inherit secrets automatically unless declared.
 - **Args live in `pyproject.toml`, not the workflow.** Tool behavior (ruff
   rules, deptry dev-dependency groups, `ty` excludes) should be configured via
   each repo's own `[tool.*]` sections, so this workflow stays argument-free
-  where possible. The two exceptions — `package-dir` and
-  `numpydoc-extra-excludes` — exist because `numpydoc`'s CLI has no
-  path-exclude equivalent expressible in `pyproject.toml`.
+  where possible. `package-dir` and `numpydoc-extra-excludes` used to be the
+  exceptions, because `numpydoc`'s CLI could express neither a set of paths to
+  walk nor a path to skip. `npdlint` reads both from `[tool.npdlint]`, so they
+  are now optional and on their way out: a fully migrated repo calls this
+  workflow with no docstring inputs at all.
 - **Coverage is opt-in.** Set `enable-coverage: true` (plus `cov-package`) to
   add a `--cov` run and a `coverage report --fail-under=` gate to the pytest
   job. Left `false`, pytest just runs `pytest tests` with no coverage
@@ -125,9 +128,18 @@ since reusable workflows don't inherit secrets automatically unless declared.
    `run:` steps (e.g. `ty --exclude`, `deptry`'s dev-dependency groups) and
    move them into the matching `[tool.*]` section instead, so the shared
    workflow can invoke each tool without repo-specific arguments.
-2. **Identify what can't move to config.** A few things (like numpydoc's
-   path excludes) have no `pyproject.toml` equivalent — these stay as
-   `with:` inputs on the `ci.yml` call.
+2. **Identify what can't move to config.** Very little has to stay a `with:`
+   input now. Docstring paths and excludes belong in `[tool.npdlint]`:
+
+   ```toml
+   [tool.npdlint]
+   include = ["qcore"]
+   extend-exclude = ["**/__init__.py", "ccldpy.py"]
+   ```
+
+   With that in place, drop `package-dir` and `numpydoc-extra-excludes` from
+   the `ci.yml` call and set `exclude-init: false`, so the exclusions live in
+   one file rather than two.
 3. **Add the caller workflow.** Create `.github/workflows/ci.yml` in the
    consuming repo per the [Usage](#usage) example above, setting only the
    inputs that differ from the defaults.
