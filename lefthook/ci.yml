@@ -30,7 +30,7 @@
 #   uvx lefthook run pre-push --all-files --force --no-tty
 #
 # Not mirrored: the coverage threshold (it needs the cov-package input), the
-# rust-features matrix, and apt system-packages.
+# rust-features matrix, rust-test-release, and apt system-packages.
 
 # Never blocks: --exit-zero and `|| true` make these report-only past the
 # fixes. In order, not parallel: the autofixes rewrite the same files, and ty
