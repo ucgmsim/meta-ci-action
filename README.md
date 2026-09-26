@@ -44,6 +44,7 @@ jobs:
 | `exclude-init` | `true` | Skip `__init__.py` in the docstring job, as the fdfind pipeline always did. Set `false` once `[tool.npdlint]` owns the exclusions and you want `__init__.py` linted too. |
 | `pytest-paths` | `"tests"` | Paths passed to `pytest`. Set to `""` to fall through to `[tool.pytest.ini_options] testpaths`. |
 | `rust-features` | `""` | Space-separated cargo feature sets; each gets its own `cargo test --features <set>` run. Ignored when the repo has no `Cargo.toml`. |
+| `rust-test-release` | `false` | Also run `cargo test --release` in the `rust` job. Debug and release builds can disagree under optimization, so a crate whose compiled extension does numeric work may want both profiles tested. Roughly doubles the `rust` job's runtime, so it stays opt-in. |
 | `enable-coverage` | `false` | When true, runs pytest with `--cov=<cov-package>` and gates on `cov-fail-under`. |
 | `cov-package` | `""` | Package name passed to `--cov=`. Required when `enable-coverage` is true. |
 | `cov-fail-under` | `95` | Coverage percentage threshold passed to `coverage report --fail-under=`. |
@@ -55,7 +56,12 @@ Nothing needs enabling. A `detect` job checks the repo out and looks for a
 
 - a `rust` job runs `cargo fmt --all --check`, `cargo clippy --all-targets -- -D
   warnings`, `cargo test`, `cargo test --doc`, and one `cargo test --features
-  <set>` per entry in `rust-features`;
+  <set>` per entry in `rust-features`; set `rust-test-release: true` to also
+  run `cargo test --release` — useful if the crate does numeric work that
+  optimization can change the behavior of (e.g. LLVM folding `powf(x, 0.5)`
+  into `sqrt(x)` at `-O2` but not at `-O0`), since debug-only testing would
+  miss a regression that only shows up in the release profile actually
+  shipped;
 - the `deptry`, `pytest` and `typecheck` jobs additionally install a stable
   Rust toolchain and a `Swatinem/rust-cache@v2` cache, since `uv sync` has to
   build the extension module in each of them.
@@ -131,7 +137,8 @@ Notes:
   `uvx lefthook run pre-push --all-files --force --no-tty`, or one check with
   `--command ty`.
 - **Not mirrored:** the coverage threshold (it needs `cov-package`),
-  `rust-features`, and `system-packages`. Install native libraries yourself.
+  `rust-features`, `rust-test-release`, and `system-packages`. Install native
+  libraries yourself.
 - **Updates.** lefthook caches the remote. Pull a newer `v2` with
   `uvx lefthook install --force`, or set `refetch: true` on the remote.
 
