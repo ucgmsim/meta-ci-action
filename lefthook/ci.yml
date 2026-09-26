@@ -9,8 +9,9 @@
 #       configs:
 #         - lefthook/ci.yml
 #
-# Autofixes (ruff, cargo fmt) and the ty check run on pre-commit against the
-# staged files. The CI gates run on
+# Pre-commit fixes what it can in the staged files (ruff, cargo fmt) and
+# reports what's left (ruff, ty), but never blocks a commit. The CI gates, which
+# do block, run on
 # pre-push against {push_files}, what the branch adds over the upstream ref,
 # one command per job in ci.yml and running the same command that job runs.
 #
@@ -31,8 +32,9 @@
 # Not mirrored: the coverage threshold (it needs the cov-package input), the
 # rust-features matrix, and apt system-packages.
 
-# In order, not parallel: the autofixes rewrite the same files, and ty should
-# check the code as it will be committed, after they have run.
+# Never blocks: --exit-zero and `|| true` make these report-only past the
+# fixes. In order, not parallel: the autofixes rewrite the same files, and ty
+# should see the code as it will be committed.
 pre-commit:
   commands:
     ruff-fix:
@@ -40,7 +42,7 @@ pre-commit:
       glob: "*.py"
       run: |
         v=$(sed -n '/^name = "ruff"$/{n;s/^version = "\(.*\)"$/\1/p;}' uv.lock 2>/dev/null)
-        uvx "ruff@${v:-latest}" check --fix --force-exclude {staged_files}
+        uvx "ruff@${v:-latest}" check --fix --exit-zero --force-exclude {staged_files}
       stage_fixed: true
 
     ruff-format:
@@ -57,12 +59,12 @@ pre-commit:
       run: cargo fmt --all
       stage_fixed: true
 
-    # No autofix, so this only blocks the commit. `ruff-fix` above already
-    # fails on violations it can't fix; this is the matching check for types.
+    # Report only: ty has no autofix, and pre-commit never blocks a commit.
+    # The same check blocks on pre-push.
     ty:
       tags: [types]
       glob: "*.py"
-      run: uv run --no-sync ty check
+      run: uv run --no-sync ty check || true
 
 pre-push:
   parallel: true

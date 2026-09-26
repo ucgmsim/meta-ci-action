@@ -96,7 +96,8 @@ command runs the same thing as the matching CI job:
 
 Pre-commit runs, in order, the autofixes on the staged files (`ruff check
 --fix`, `ruff format`, `cargo fmt`, staged back automatically) and then `ty
-check`. Both ruff and ty block the commit on anything left that they can't fix.
+check`. It reports whatever ruff and ty can't fix but never blocks the commit;
+pre-push is the gate.
 
 In the consuming repo, a `lefthook.yml` that loads it:
 
