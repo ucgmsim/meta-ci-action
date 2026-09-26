@@ -9,7 +9,8 @@
 #       configs:
 #         - lefthook/ci.yml
 #
-# Autofixes run on pre-commit against the staged files. The CI gates run on
+# Autofixes (ruff, cargo fmt) and the ty check run on pre-commit against the
+# staged files. The CI gates run on
 # pre-push against {push_files}, what the branch adds over the upstream ref,
 # one command per job in ci.yml and running the same command that job runs.
 #
@@ -30,8 +31,9 @@
 # Not mirrored: the coverage threshold (it needs the cov-package input), the
 # rust-features matrix, and apt system-packages.
 
+# In order, not parallel: the autofixes rewrite the same files, and ty should
+# check the code as it will be committed, after they have run.
 pre-commit:
-  parallel: true
   commands:
     ruff-fix:
       tags: [autofix, ruff]
@@ -54,6 +56,13 @@ pre-commit:
       glob: "*.rs"
       run: cargo fmt --all
       stage_fixed: true
+
+    # No autofix, so this only blocks the commit. `ruff-fix` above already
+    # fails on violations it can't fix; this is the matching check for types.
+    ty:
+      tags: [types]
+      glob: "*.py"
+      run: uv run --no-sync ty check
 
 pre-push:
   parallel: true

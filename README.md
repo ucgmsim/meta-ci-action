@@ -94,8 +94,9 @@ command runs the same thing as the matching CI job:
 | `pytest` | `pytest`, without the coverage gate | `tests` |
 | `rustfmt`, `clippy`, `cargo-test` | `rust` | `rust` |
 
-Pre-commit adds autofixes on the staged files (`ruff check --fix`, `ruff
-format`, `cargo fmt`), staged back automatically.
+Pre-commit runs, in order, the autofixes on the staged files (`ruff check
+--fix`, `ruff format`, `cargo fmt`, staged back automatically) and then `ty
+check`. Both ruff and ty block the commit on anything left that they can't fix.
 
 In the consuming repo, a `lefthook.yml` that loads it:
 
