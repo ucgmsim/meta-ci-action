@@ -1,0 +1,127 @@
+# lefthook/ci.yml
+#
+# A local mirror of .github/workflows/ci.yml, loaded by a consuming repo's
+# lefthook.yml as a remote config:
+#
+#   remotes:
+#     - git_url: https://github.com/ucgmsim/meta-ci-action
+#       ref: v2
+#       configs:
+#         - lefthook/ci.yml
+#
+# Autofixes run on pre-commit against the staged files. The CI gates run on
+# pre-push against {push_files}, what the branch adds over the upstream ref,
+# one command per job in ci.yml and running the same command that job runs.
+#
+# The gates use the project environment (`uv run --no-sync`), as ci.yml does
+# after its `uv sync`, so run `uv sync` with the repo's extras first. ruff runs
+# at the version pinned in uv.lock, which is the version the ruff job uses.
+#
+# Every command is tagged. A repo turns commands off in its own lefthook.yml
+# with `exclude_tags` (e.g. `pre-push: {exclude_tags: [tests]}`), or for one
+# push with LEFTHOOK_EXCLUDE=tests. Commands with the same name in the repo's
+# lefthook.yml do not override these: lefthook gives remote configs priority.
+# ruff is passed --force-exclude so the repo's excludes hold for named files.
+#
+# To run the whole gate without pushing (as the scheduled bot jobs do):
+#
+#   uvx lefthook run pre-push --all-files --force --no-tty
+#
+# Not mirrored: the coverage threshold (it needs the cov-package input), the
+# rust-features matrix, and apt system-packages.
+
+pre-commit:
+  parallel: true
+  commands:
+    ruff-fix:
+      tags: [autofix, ruff]
+      glob: "*.py"
+      run: |
+        v=$(sed -n '/^name = "ruff"$/{n;s/^version = "\(.*\)"$/\1/p;}' uv.lock 2>/dev/null)
+        uvx "ruff@${v:-latest}" check --fix --force-exclude {staged_files}
+      stage_fixed: true
+
+    ruff-format:
+      tags: [autofix, ruff]
+      glob: "*.py"
+      run: |
+        v=$(sed -n '/^name = "ruff"$/{n;s/^version = "\(.*\)"$/\1/p;}' uv.lock 2>/dev/null)
+        uvx "ruff@${v:-latest}" format --force-exclude {staged_files}
+      stage_fixed: true
+
+    rustfmt:
+      tags: [autofix, rust]
+      glob: "*.rs"
+      run: cargo fmt --all
+      stage_fixed: true
+
+pre-push:
+  parallel: true
+  commands:
+    # ci.yml: ruff job
+    ruff:
+      tags: [ruff]
+      glob: "*.py"
+      run: |
+        v=$(sed -n '/^name = "ruff"$/{n;s/^version = "\(.*\)"$/\1/p;}' uv.lock 2>/dev/null)
+        uvx "ruff@${v:-latest}" check --force-exclude {push_files}
+
+    ruff-format:
+      tags: [ruff]
+      glob: "*.py"
+      run: |
+        v=$(sed -n '/^name = "ruff"$/{n;s/^version = "\(.*\)"$/\1/p;}' uv.lock 2>/dev/null)
+        uvx "ruff@${v:-latest}" format --check --force-exclude {push_files}
+
+    # ci.yml: deptry job. Whole project: an import anywhere can make a
+    # declared dependency used or unused.
+    deptry:
+      tags: [deptry]
+      glob: "{*.py,pyproject.toml}"
+      run: uv run --no-sync deptry .
+
+    # ci.yml: numpydoc-lint job. Scope and exclusions come from
+    # [tool.npdlint], so no file list: named files would be linted even
+    # outside its `include`. __init__.py is skipped, as ci.yml's exclude-init
+    # default does. npdlint is not a project dependency in CI either, hence uvx.
+    npdlint:
+      tags: [docs]
+      glob: "*.py"
+      run: uvx npdlint check --extend-exclude "**/__init__.py"
+
+    # ci.yml: typecheck job. Whole project rather than {push_files}: ty checks
+    # explicitly named files even when [tool.ty.src] excludes them.
+    ty:
+      tags: [types]
+      glob: "*.py"
+      run: uv run --no-sync ty check
+
+    # ci.yml: pytest job, without the coverage gate. A Rust change can break
+    # the Python tests through the extension module, so it triggers them too.
+    pytest:
+      tags: [tests]
+      glob: "*.{py,rs}"
+      # ci.yml passes pytest-paths (default "tests"); repos that clear it rely
+      # on [tool.pytest.ini_options] testpaths, so follow whichever is set.
+      run: |
+        if grep -q '^testpaths' pyproject.toml 2>/dev/null; then
+          uv run --no-sync pytest
+        else
+          uv run --no-sync pytest tests
+        fi
+
+    # ci.yml: rust job. Whole crate, which is what cargo takes.
+    rustfmt:
+      tags: [rust]
+      glob: "*.rs"
+      run: cargo fmt --all --check
+
+    clippy:
+      tags: [rust]
+      glob: "*.rs"
+      run: cargo clippy --all-targets -- -D warnings
+
+    cargo-test:
+      tags: [rust, tests]
+      glob: "*.rs"
+      run: cargo test
