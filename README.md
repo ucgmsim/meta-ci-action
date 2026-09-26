@@ -128,8 +128,9 @@ Notes:
   `LEFTHOOK_EXCLUDE=tests git push`. Commands with new names (e.g. a
   `yamllint` hook) merge in alongside.
 - **Run the whole gate without pushing** (what the scheduled bot jobs do):
-  `uvx lefthook run pre-push --all-files --force --no-tty`, or one check with
-  `--command ty`.
+  `uvx lefthook run pre-push --all-files --no-tty`, or one check with
+  `--command ty`. Don't add `--force`: it runs commands whose glob matches
+  nothing, such as the Rust checks in a repo with no crate, which CI skips.
 - **Not mirrored:** the coverage threshold (it needs `cov-package`),
   `rust-features`, and `system-packages`. Install native libraries yourself.
 - **Updates.** lefthook caches the remote. Pull a newer `v2` with

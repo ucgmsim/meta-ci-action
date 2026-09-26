@@ -27,7 +27,10 @@
 #
 # To run the whole gate without pushing (as the scheduled bot jobs do):
 #
-#   uvx lefthook run pre-push --all-files --force --no-tty
+#   uvx lefthook run pre-push --all-files --no-tty
+#
+# Not --force: that runs commands whose glob matches nothing, e.g. the Rust
+# checks in a repo with no crate, which ci.yml's detect job skips.
 #
 # Not mirrored: the coverage threshold (it needs the cov-package input), the
 # rust-features matrix, and apt system-packages.
