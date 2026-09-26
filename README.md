@@ -79,6 +79,62 @@ Each job runs `uv sync` once and then `uv run --no-sync`, so the config
 settings applied at sync time are the ones the tests run against and no step
 silently rebuilds the crate.
 
+## Usage: run CI locally with lefthook
+
+`lefthook/ci.yml` mirrors `ci.yml` as [lefthook](https://lefthook.dev) git
+hooks, so a failure shows up on `git push` instead of in the PR. Each pre-push
+command runs the same thing as the matching CI job:
+
+| Hook command | CI job | Tag |
+|---|---|---|
+| `ruff`, `ruff-format` | `ruff` (at the ruff version pinned in `uv.lock`) | `ruff` |
+| `deptry` | `deptry` | `deptry` |
+| `npdlint` | `numpydoc-lint` (scope from `[tool.npdlint]`) | `docs` |
+| `ty` | `typecheck` | `types` |
+| `pytest` | `pytest`, without the coverage gate | `tests` |
+| `rustfmt`, `clippy`, `cargo-test` | `rust` | `rust` |
+
+Pre-commit runs, in order, the autofixes on the staged files (`ruff check
+--fix`, `ruff format`, `cargo fmt`, staged back automatically) and then `ty
+check`. It reports whatever ruff and ty can't fix but never blocks the commit;
+pre-push is the gate.
+
+In the consuming repo, a `lefthook.yml` that loads it:
+
+```yaml
+remotes:
+  - git_url: https://github.com/ucgmsim/meta-ci-action
+    ref: v2
+    configs:
+      - lefthook/ci.yml
+
+# Optional: turn off commands by tag, e.g. slow tests on every push.
+# pre-push:
+#   exclude_tags: [tests]
+```
+
+Then, once per clone:
+
+```bash
+uv sync --all-extras --dev   # the hooks use the project environment, as CI does
+uvx lefthook install
+```
+
+Notes:
+
+- **Overriding.** lefthook gives remote configs priority, so redefining a
+  command with the same name in the repo's `lefthook.yml` has no effect.
+  Turn commands off with `exclude_tags`, or for one push with
+  `LEFTHOOK_EXCLUDE=tests git push`. Commands with new names (e.g. a
+  `yamllint` hook) merge in alongside.
+- **Run the whole gate without pushing** (what the scheduled bot jobs do):
+  `uvx lefthook run pre-push --all-files --force --no-tty`, or one check with
+  `--command ty`.
+- **Not mirrored:** the coverage threshold (it needs `cov-package`),
+  `rust-features`, and `system-packages`. Install native libraries yourself.
+- **Updates.** lefthook caches the remote. Pull a newer `v2` with
+  `uvx lefthook install --force`, or set `refetch: true` on the remote.
+
 ## Usage: Claude PR review
 
 `claude-review.yml` is a `workflow_call`-only reusable workflow — it has no
