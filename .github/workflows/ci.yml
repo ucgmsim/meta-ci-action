@@ -35,6 +35,10 @@ on:
         description: "Space-separated cargo feature sets; each gets its own 'cargo test --features <set>' run. Only used when a Cargo.toml is present."
         type: string
         default: ""
+      rust-test-release:
+        description: "Also run 'cargo test --release' in the rust job. Debug and release builds can disagree under optimization (e.g. LLVM folding 'powf(x, 0.5)' into 'sqrt(x)' at -O2 but not at -O0), so a crate whose compiled extension does numeric work may want both profiles tested. Off by default, since it roughly doubles the rust job's runtime."
+        type: boolean
+        default: false
       enable-coverage:
         description: "When true, run pytest with coverage and gate on cov-fail-under."
         type: boolean
@@ -159,6 +163,9 @@ jobs:
         run: cargo clippy --all-targets -- -D warnings
       - name: cargo test
         run: cargo test
+      - name: cargo test --release
+        if: inputs.rust-test-release
+        run: cargo test --release
       - name: cargo test (extra feature sets)
         if: inputs.rust-features != ''
         env:
