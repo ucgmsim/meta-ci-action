@@ -1,0 +1,188 @@
+name: Build Python distributions
+
+# Reusable workflow that builds a package's sdist and wheels and hands them
+# back as a single artifact. It deliberately stops short of uploading to PyPI:
+# pypa/gh-action-pypi-publish does not support trusted publishing from inside
+# a reusable workflow, so the caller keeps a small publish job of its own that
+# downloads the artifact (see the README for the full caller).
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: "Git ref (usually a tag) to check out and build. Empty means the ref that triggered the caller, i.e. the release tag on a 'release' event. Pass a workflow_dispatch 'tag_name' input straight through."
+        type: string
+        default: ""
+      python-version:
+        description: "Python version uv uses to run the build backend for the sdist (and, for pure-Python packages, the wheel). cibuildwheel picks its own interpreters from 'requires-python'."
+        type: string
+        default: "3.13"
+      artifact-name:
+        description: "Name of the artifact holding every built file. The caller's publish job downloads it into 'dist/'."
+        type: string
+        default: "python-package-distributions"
+      wheel-runners:
+        description: "JSON list of runners for the cibuildwheel matrix. Only used when a Cargo.toml is present."
+        type: string
+        default: '["ubuntu-latest", "macos-latest", "windows-latest"]'
+      cibw-build:
+        description: "CIBW_BUILD selector, e.g. 'cp312-* cp313-*'. Empty leaves it to '[tool.cibuildwheel] build' or cibuildwheel's default (every CPython that 'requires-python' allows)."
+        type: string
+        default: ""
+      cibw-skip:
+        description: "CIBW_SKIP selector, e.g. 'pp* *-musllinux_* *t-*'. Set as an environment variable, so it overrides '[tool.cibuildwheel] skip'; set it to '' to let pyproject.toml decide."
+        type: string
+        default: "pp* *-musllinux_*"
+      cibw-archs-linux:
+        description: "CIBW_ARCHS_LINUX. Set '' to defer to '[tool.cibuildwheel.linux] archs'."
+        type: string
+        default: "x86_64"
+      cibw-archs-macos:
+        description: "CIBW_ARCHS_MACOS. Both Intel and Apple Silicon by default. Set '' to defer to '[tool.cibuildwheel.macos] archs'."
+        type: string
+        default: "x86_64 arm64"
+      cibw-archs-windows:
+        description: "CIBW_ARCHS_WINDOWS. Set '' to defer to '[tool.cibuildwheel.windows] archs'."
+        type: string
+        default: "AMD64"
+      macosx-deployment-target:
+        description: "MACOSX_DEPLOYMENT_TARGET for the macOS wheels. Rust extensions need at least 11.0 to build the arm64 slice."
+        type: string
+        default: "11.0"
+    outputs:
+      artifact-name:
+        description: "Name of the artifact holding the sdist and every wheel."
+        value: ${{ jobs.merge.outputs.artifact-name }}
+      version:
+        description: "Normalised package version, read off the sdist filename (e.g. what setuptools-scm derived from the tag)."
+        value: ${{ jobs.build.outputs.version }}
+
+jobs:
+  # Same gate as ci.yml: hashFiles() is not available in a job-level `if:`, so
+  # a real job looks for a Cargo.toml. A crate means platform-specific wheels
+  # (cibuildwheel matrix); no crate means one py3-none-any wheel serves every
+  # platform and the matrix would just burn macOS and Windows minutes.
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      has-rust: ${{ steps.cargo.outputs.has-rust }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+      - id: cargo
+        shell: bash
+        run: |
+          if [ -n "$(find . -name Cargo.toml -not -path './target/*' -print -quit)" ]; then
+            echo "has-rust=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has-rust=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # The sdist, always; plus the wheel when the package is pure Python.
+  build:
+    needs: detect
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          # setuptools-scm derives the version from the tag, so it needs the
+          # full history rather than a shallow clone.
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ inputs.python-version }}
+      - name: uv build
+        env:
+          HAS_RUST: ${{ needs.detect.outputs.has-rust }}
+        run: |
+          if [ "$HAS_RUST" = "true" ]; then
+            uv build --sdist --out-dir dist
+          else
+            uv build --out-dir dist
+          fi
+      - name: Read the version off the sdist
+        id: version
+        # Sdist filenames are '<normalised_name>-<version>.tar.gz', and a
+        # normalised version never contains '-', so it is the last field.
+        run: |
+          sdist=$(basename dist/*.tar.gz .tar.gz)
+          echo "version=${sdist##*-}" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact-name }}-part-sdist
+          path: dist/
+          if-no-files-found: error
+
+  # Platform wheels for packages with a Rust extension.
+  wheels:
+    needs: detect
+    if: needs.detect.outputs.has-rust == 'true'
+    strategy:
+      matrix:
+        os: ${{ fromJSON(inputs.wheel-runners) }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          fetch-depth: 0
+      # macOS runners cross-compile the Intel slice, so both targets are needed
+      # there; Linux builds inside cibuildwheel's container (see below).
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ runner.os == 'macOS' && 'x86_64-apple-darwin, aarch64-apple-darwin' || '' }}
+      - name: Configure cibuildwheel
+        shell: bash
+        # Only non-empty inputs are exported: an exported variable overrides
+        # [tool.cibuildwheel] in pyproject.toml, so '' hands the setting back
+        # to the repo's config. Inputs are read from the environment rather
+        # than interpolated into the script, so they cannot inject shell.
+        env:
+          IN_CIBW_BUILD: ${{ inputs.cibw-build }}
+          IN_CIBW_SKIP: ${{ inputs.cibw-skip }}
+          IN_CIBW_ARCHS_LINUX: ${{ inputs.cibw-archs-linux }}
+          IN_CIBW_ARCHS_MACOS: ${{ inputs.cibw-archs-macos }}
+          IN_CIBW_ARCHS_WINDOWS: ${{ inputs.cibw-archs-windows }}
+          IN_MACOSX_DEPLOYMENT_TARGET: ${{ inputs.macosx-deployment-target }}
+        run: |
+          for name in CIBW_BUILD CIBW_SKIP CIBW_ARCHS_LINUX CIBW_ARCHS_MACOS \
+              CIBW_ARCHS_WINDOWS MACOSX_DEPLOYMENT_TARGET; do
+            input="IN_$name"
+            value="${!input}"
+            if [ -n "$value" ]; then
+              echo "$name=$value" >> "$GITHUB_ENV"
+            fi
+          done
+      - uses: pypa/cibuildwheel@v4.1.0
+        env:
+          # Linux wheels are built inside a manylinux container, not on the
+          # runner, so Rust has to be installed there too. safe.directory is
+          # needed because the checkout is mounted at /project under another
+          # uid, which otherwise makes git (and so setuptools-scm) refuse to
+          # read the version.
+          CIBW_BEFORE_ALL_LINUX: "git config --global --add safe.directory /project && curl https://sh.rustup.rs -sSf | sh -s -- --default-toolchain stable -y"
+          CIBW_ENVIRONMENT_LINUX: 'PATH="$HOME/.cargo/bin:$PATH"'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact-name }}-part-wheels-${{ matrix.os }}
+          path: wheelhouse/*.whl
+          if-no-files-found: error
+
+  # One artifact for the caller to download, whichever path built the files.
+  merge:
+    needs: [build, wheels]
+    # `wheels` is skipped for pure-Python packages, which would otherwise skip
+    # this job too.
+    if: ${{ !cancelled() && needs.build.result == 'success' && (needs.wheels.result == 'success' || needs.wheels.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    outputs:
+      artifact-name: ${{ inputs.artifact-name }}
+    steps:
+      - uses: actions/upload-artifact/merge@v4
+        with:
+          name: ${{ inputs.artifact-name }}
+          pattern: ${{ inputs.artifact-name }}-part-*
+          delete-merged: true

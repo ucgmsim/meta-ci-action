@@ -8,6 +8,9 @@ Shared, reusable GitHub Actions workflows for `ucgmsim` Python repos:
   appears for repos containing a `Cargo.toml`.
 - **`claude-review.yml`** — an on-demand Claude PR review, triggered by a
   `@claude review` comment (never automatically on PR open/push).
+- **`build-dist.yml`** — builds a release's sdist and wheels (one pure wheel,
+  or a `cibuildwheel` matrix for repos with a `Cargo.toml`) as a single
+  artifact, for the caller's PyPI publish job to upload.
 
 ## Usage: CI
 
@@ -168,6 +171,87 @@ The reusable workflow itself gates on `contains(github.event.comment.body,
 creation, push, or any other event. `CLAUDE_CODE_OAUTH_TOKEN` must be set as
 a secret in the consuming repo (or its org) and passed through explicitly,
 since reusable workflows don't inherit secrets automatically unless declared.
+
+## Usage: building distributions for PyPI
+
+`build-dist.yml` replaces the `build` job(s) of a repo's `publish-PyPI.yml`.
+It does **not** upload: `pypa/gh-action-pypi-publish` does not support
+trusted publishing from inside a reusable workflow, so the PyPI upload stays
+a short job in the caller, which also keeps the `pypi` environment and the
+trusted-publisher configuration on PyPI unchanged. A whole
+`.github/workflows/publish-PyPI.yml`:
+
+```yaml
+name: Publish to PyPI
+run-name: Publish Python Package to PyPI for release ${{ github.event.release.tag_name || inputs.tag_name || github.ref_name }}
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: "Git tag to checkout and publish"
+        required: false
+        type: string
+
+jobs:
+  build:
+    uses: ucgmsim/meta-ci-action/.github/workflows/build-dist.yml@v2
+    with:
+      ref: ${{ inputs.tag_name }}       # empty on a release: builds the release tag
+      # cibw-skip: "pp* *-musllinux_* *t-*"
+      # cibw-build: "cp312-* cp313-* cp314-*"
+
+  publish-to-pypi:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/<your-project>
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.artifact-name }}
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@v1.13.0
+```
+
+What it builds depends on the same `Cargo.toml` detection as `ci.yml`:
+
+- **No crate:** one `ubuntu-latest` job runs `uv build`, giving a
+  `py3-none-any` wheel and the sdist. No matrix, since the one wheel serves
+  every platform.
+- **A crate:** the sdist comes from `uv build --sdist`, and a
+  `pypa/cibuildwheel` matrix over `wheel-runners` builds the platform wheels,
+  with Rust installed on the runner (plus both macOS targets) and inside the
+  manylinux container.
+
+Checkouts use `fetch-depth: 0`, so setuptools-scm can read the version from
+the tag. The `version` output is that version, read off the sdist filename,
+for later jobs that need it (e.g. tagging a container image).
+
+| Input | Default | Purpose |
+|---|---|---|
+| `ref` | `""` | Ref to check out and build. Empty means the ref that triggered the caller (the release tag on `release`). Pass a `workflow_dispatch` `tag_name` straight through. |
+| `python-version` | `"3.13"` | Interpreter `uv build` runs the build backend with. |
+| `artifact-name` | `"python-package-distributions"` | Name of the merged artifact; also the `artifact-name` output. |
+| `wheel-runners` | `'["ubuntu-latest", "macos-latest", "windows-latest"]'` | JSON list of runners for the cibuildwheel matrix. Crate repos only. |
+| `cibw-build` | `""` | `CIBW_BUILD`. Empty: every CPython `requires-python` allows. |
+| `cibw-skip` | `"pp* *-musllinux_*"` | `CIBW_SKIP`. |
+| `cibw-archs-linux` | `"x86_64"` | `CIBW_ARCHS_LINUX`. |
+| `cibw-archs-macos` | `"x86_64 arm64"` | `CIBW_ARCHS_MACOS` (Intel and Apple Silicon). |
+| `cibw-archs-windows` | `"AMD64"` | `CIBW_ARCHS_WINDOWS`. |
+| `macosx-deployment-target` | `"11.0"` | `MACOSX_DEPLOYMENT_TARGET`; Rust needs at least 11.0 for the arm64 slice. |
+
+The `cibw-*` inputs are exported as environment variables, which take
+precedence over `[tool.cibuildwheel]` in `pyproject.toml`. To keep a setting
+in `pyproject.toml` instead, pass `''` for that input; empty inputs are not
+exported. There is no lefthook command for this workflow: it only builds
+release artifacts, so there is nothing to check before a push.
 
 ## Design principles
 
