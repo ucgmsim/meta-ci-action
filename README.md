@@ -11,6 +11,8 @@ Shared, reusable GitHub Actions workflows for `ucgmsim` Python repos:
 - **`build-dist.yml`** — builds a release's sdist and wheels (one pure wheel,
   or a `cibuildwheel` matrix for repos with a `Cargo.toml`) as a single
   artifact, for the caller's PyPI publish job to upload.
+- **`wiki.yml`** — publishes the repo's `wiki/` directory to its GitHub wiki,
+  rewriting relative `.md` links to wiki page links on the way.
 
 ## Usage: CI
 
@@ -252,6 +254,46 @@ precedence over `[tool.cibuildwheel]` in `pyproject.toml`. To keep a setting
 in `pyproject.toml` instead, pass `''` for that input; empty inputs are not
 exported. There is no lefthook command for this workflow: it only builds
 release artifacts, so there is nothing to check before a push.
+
+## Usage: wiki sync
+
+`wiki.yml` replaces a repo's own `wiki.yml`/`deploy-wiki.yml`. It checks the
+repo out, strips the `.md` from relative links (`[Usage](Usage.md)` becomes
+`[Usage](Usage)`, so links that work when browsing `wiki/` in the repo also
+work in the wiki), and pushes the directory with `actions4gh/deploy-wiki`.
+The trigger stays in the caller, and so does the `contents: write` grant,
+since a called workflow cannot widen its caller's token permissions. A whole
+`.github/workflows/wiki.yml`:
+
+```yaml
+name: deploy-wiki
+on:
+  push:
+    branches: [main]          # the default branch
+    paths: wiki/**
+  workflow_dispatch:
+
+jobs:
+  deploy-wiki:
+    uses: ucgmsim/meta-ci-action/.github/workflows/wiki.yml@v2
+    permissions:
+      contents: write
+    # with:
+    #   wiki-dir: docs/wiki
+    #   rewrite-md-links: false
+```
+
+The wiki must already exist: create its first page once in the GitHub UI, or
+`<repo>.wiki.git` has nothing to push to. Runs are queued per repo rather than
+run in parallel, since each one replaces the whole wiki.
+
+| Input | Default | Purpose |
+|---|---|---|
+| `wiki-dir` | `"wiki"` | Directory holding the wiki's Markdown pages. Its contents replace the wiki's. |
+| `rewrite-md-links` | `true` | Strip `.md` from relative Markdown links before deploying. Absolute `https://` links are left alone. Set `false` if the pages already use wiki-style links. |
+
+There is no lefthook command for this workflow: it only publishes, so there
+is nothing to check before a push.
 
 ## Design principles
 
