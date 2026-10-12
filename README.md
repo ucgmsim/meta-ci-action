@@ -201,7 +201,7 @@ jobs:
     with:
       ref: ${{ inputs.tag_name }}       # empty on a release: builds the release tag
       # cibw-skip: "pp* *-musllinux_* *t-*"
-      # cibw-build: "cp312-* cp313-* cp314-*"
+      # cibw-build: "cp312-* cp313-* cp314-* cp315-*"
 
   publish-to-pypi:
     name: Publish to PyPI
