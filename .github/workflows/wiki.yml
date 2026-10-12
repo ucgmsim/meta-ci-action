@@ -1,0 +1,47 @@
+name: Deploy wiki
+
+# Reusable workflow that publishes a repo's `wiki/` directory to its GitHub
+# wiki. The trigger (push to the default branch, filtered to `wiki/**`) stays
+# in the caller, as does the `contents: write` grant: a called workflow can
+# only narrow the GITHUB_TOKEN permissions its caller gives it, never widen
+# them (see the README for the full caller).
+on:
+  workflow_call:
+    inputs:
+      wiki-dir:
+        description: "Directory, relative to the repo root, holding the wiki's Markdown pages. Its contents replace the wiki's."
+        type: string
+        default: "wiki"
+      rewrite-md-links:
+        description: "Strip the '.md' from relative links such as '[Usage](Usage.md)' before deploying. Those links work when browsing the directory in the repo, but GitHub wiki pages are addressed without the extension, so they 404 in the wiki. Set false if the pages already link wiki-style."
+        type: boolean
+        default: true
+
+jobs:
+  deploy-wiki:
+    # Each run force-pushes the whole wiki, so two pushes landing close
+    # together must deploy one after the other rather than race. Queued, not
+    # cancelled: the later run carries the newer pages either way.
+    concurrency:
+      group: deploy-wiki-${{ github.repository }}
+      cancel-in-progress: false
+    permissions:
+      contents: write         # push to the <repo>.wiki.git repository
+    runs-on: ubuntu-latest
+    env:
+      WIKI_DIR: ${{ inputs.wiki-dir }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rewrite relative .md links to wiki page links
+        if: inputs.rewrite-md-links
+        # The same rewrite the repos' own wiki.yml files did with
+        # `perl ... wiki/*.md`, extended to subdirectories, which GitHub
+        # flattens into one page namespace anyway. Absolute https:// links are
+        # left alone. The directory is read from the environment rather than
+        # interpolated into the script, so a caller cannot inject shell.
+        run: |
+          find "$WIKI_DIR" -name '*.md' -exec \
+            perl -i -pe 's;(\[.*?\])\((?!https:\/\/)(.*?)\.md\);\1(\2);g' {} +
+      - uses: actions4gh/deploy-wiki@v1
+        with:
+          path: ${{ inputs.wiki-dir }}
