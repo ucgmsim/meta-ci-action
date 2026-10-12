@@ -156,7 +156,7 @@ jobs:
               echo "$name=$value" >> "$GITHUB_ENV"
             fi
           done
-      - uses: pypa/cibuildwheel@v4.1.0
+      - uses: pypa/cibuildwheel@v4.3.1
         env:
           # Linux wheels are built inside a manylinux container, not on the
           # runner, so Rust has to be installed there too. safe.directory is
