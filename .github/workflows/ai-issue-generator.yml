@@ -1,0 +1,125 @@
+name: AI issue generator
+
+# Claude reviews part of the repo and files a few vetted issues (`ai-suggested`;
+# `ai-serious` for a bug that needs a human soon). A maintainer labels the ones worth
+# fixing `ai-ok`, and ai-issue-solver.yml picks them up. Called weekly from each repo's
+# .github/workflows/ai.yml; see the README.
+
+on:
+  workflow_call:
+    inputs:
+      system-packages:
+        description: "Space-separated apt packages the repo's tests need (as for ci.yml)."
+        type: string
+        default: ""
+      uv-extra-args:
+        description: "Flags passed to 'uv sync', so Claude can run the code to confirm a bug."
+        type: string
+        default: "--all-extras --dev"
+      max-issues:
+        description: "Most issues filed per run."
+        type: number
+        default: 5
+      max-open-suggestions:
+        description: "Skip the run while this many 'ai-suggested' issues are open."
+        type: number
+        default: 10
+      reviewer:
+        description: "GitHub user assigned 'ai-serious' issues. Empty for nobody."
+        type: string
+        default: "lispandfound"
+      model:
+        type: string
+        default: "claude-opus-5-5"
+      max-turns:
+        type: number
+        default: 150
+    secrets:
+      claude_code_oauth_token:
+        required: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    outputs:
+      go: ${{ steps.cap.outputs.go }}
+    steps:
+      - id: cap
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MAX_OPEN: ${{ inputs.max-open-suggestions }}
+        run: |
+          gh label create ai-suggested -R "$GITHUB_REPOSITORY" --force --color d4c5f9 --description "Filed by the AI issue generator"
+          gh label create ai-serious -R "$GITHUB_REPOSITORY" --force --color b60205 --description "The AI issue generator found a serious bug; needs a human"
+          open=$(gh issue list -R "$GITHUB_REPOSITORY" --label ai-suggested --state open --limit 200 --json number --jq length)
+          echo "$open ai-suggested issues open (limit $MAX_OPEN)"
+          echo "go=$([ "$open" -lt "$MAX_OPEN" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+  generate:
+    needs: check
+    if: needs.check.outputs.go == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      issues: write
+      id-token: write  # the Claude GitHub App's token, which Claude files the issues with
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0  # git log, to find the files that changed most
+      - if: inputs.system-packages != ''
+        run: sudo apt-get update && sudo apt-get install -y ${{ inputs.system-packages }}
+      - uses: astral-sh/setup-uv@v6
+      - run: |
+          uv sync ${{ inputs.uv-extra-args }}
+          echo ".ai/" >> .git/info/exclude
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.claude_code_oauth_token }}
+          prompt: |
+            You are reviewing part of ${{ github.repository }} for bugs and worthwhile
+            improvements, unattended. Nobody will answer questions. You do not change code:
+            your output is GitHub issues, filed with `gh issue create`.
+
+            1. Survey the source code (not tests, or docs) for review this week. List the `ai-suggested` issues from the last eight weeks
+               (`gh issue list --label ai-suggested --state all --limit 100 --json number,title,body,createdAt`)
+               and skip the files they cover. Among the rest, prefer files that changed most in
+               the last 90 days (`git log --since=90.days --name-only --format=`).
+            2. Read CLAUDE.md if it exists, then the files you chose and their tests.
+            3. Look for, in priority order:
+               - correctness bugs: wrong results, crashes on valid input, unit or sign
+                 errors, off-by-one, wrong axis, silent NaN or overflow, broken edge cases
+                 (zero-length, dip of 0 or 90, empty arrays), resources not closed;
+               - missing tests for important behaviour;
+               - small, clear improvements: dead code, duplicated logic, misleading names
+                 or docstrings, deprecated API usage.
+            4. Confirm every bug before reporting it. Write a minimal reproducer under .ai/
+               and run it with `uv run --no-sync python .ai/<file>.py`. Report only what you
+               confirmed, or can show by reading the code with no reasonable doubt.
+            5. Before filing anything, check it hasn't been raised before, open or closed:
+               search with `gh issue list --state all --search "<keywords>"` and
+               `gh pr list --state all --search "<keywords>"`. Don't file a duplicate or near
+               duplicate, and don't re-raise something a maintainer closed as won't-fix or not
+               planned.
+            6. File at most ${{ inputs.max-issues }} issues. Fewer, well-evidenced issues are
+               better than many speculative ones. File nothing if you found nothing solid.
+
+            File each one with
+            `gh issue create --title "<title>" --body-file .ai/issue-<n>.md --label ai-suggested`.
+            The title is short and specific. The body gives the location (file:line), what is
+            wrong, the reproducer and its output, and a suggested fix. End the body with a line
+            "_Filed by the AI issue generator. Kind: <bug|tests|refactor|docs>, severity: <critical|high|medium|low>._"
+            Severity `critical` or `high` is a bug that silently produces wrong scientific
+            results or crashes normal use; add `--label ai-serious` to those and, if
+            "${{ inputs.reviewer }}" isn't empty, `--assignee ${{ inputs.reviewer }}`.
+            Everything else is `medium` or `low`.
+
+            Finish with a one-line summary of what you reviewed and filed.
+          claude_args: |
+            --model ${{ inputs.model }}
+            --max-turns ${{ inputs.max-turns }}
+            --allowedTools "Read,Write,Glob,Grep,Bash(uv run:*),Bash(git log:*),Bash(git ls-files:*),Bash(gh issue list:*),Bash(gh issue view:*),Bash(gh issue create:*),Bash(gh pr list:*)"
