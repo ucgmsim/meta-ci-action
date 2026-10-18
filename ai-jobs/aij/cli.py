@@ -13,8 +13,6 @@ from . import core, ghapp
 from .core import Done, Log, Run, Skip
 from .jobs import JOBS, mark_stuck
 
-META_JOBS = {"ci-promote"}  # jobs that run on meta-ci-action, and only there
-
 
 def truthy(value: str) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on", "live"}
@@ -22,8 +20,6 @@ def truthy(value: str) -> bool:
 
 def run_steps(r: Run) -> str:
     """Run the job's steps in order; the status is the last step's, or why it stopped early."""
-    if (r.job in META_JOBS) != r.repo.is_meta:
-        return f"{r.job} doesn't run on {'meta' if r.repo.is_meta else 'non-meta'} repos"
     if r.live:
         core.ensure_labels(r.repo)
     status = "done"

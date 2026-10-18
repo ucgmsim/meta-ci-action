@@ -47,8 +47,6 @@ def token() -> str:
         cached = json.loads(CACHE.read_text())
         if dt.datetime.fromisoformat(cached["expires_at"]) - dt.datetime.now(dt.UTC) > MIN_LEFT:
             return cached["token"]
-    # Every repo the app is installed on in the org shares one installation, so the token
-    # also reaches meta-ci-action (ci-conformance) and the other repos (ci-promote).
     installation = api("GET", f"repos/{os.environ['GITHUB_REPOSITORY']}/installation", app_jwt())["id"]
     out = api("POST", f"app/installations/{installation}/access_tokens", app_jwt())
     CACHE.parent.mkdir(parents=True, exist_ok=True)

@@ -1,15 +1,15 @@
 name: AI jobs
 
-# Scheduled repo maintenance by Claude, as the org's GitHub App (ucgmsim[bot]): fixes for
-# ai-ok issues, lockfile and lint chores, CI conformance, an issue sweep, and coverage and
-# mutation-testing PRs. Each repo calls this from a thin .github/workflows/ai-jobs.yml with
-# a daily cron; see ai-jobs/README.md. The job code is ai-jobs/aij.
+# Scheduled issue work by Claude, as the org's GitHub App (ucgmsim[bot]): a weekly sweep
+# that files vetted issues, and a daily fix for the oldest issue a maintainer labelled ai-ok.
+# Each repo calls this from a thin .github/workflows/ai-jobs.yml with a daily cron; see
+# ai-jobs/README.md. The job code is ai-jobs/aij.
 
 on:
   workflow_call:
     inputs:
       jobs:
-        description: "Space-separated jobs to run now, e.g. 'lint ai-ok'. Empty runs today's, by the weekday in Auckland: ai-ok every day; lockfile, lint, ci-conformance and issue-sweep on Sundays (ci-promote instead, on meta-ci-action); coverage and mutants on Wednesdays."
+        description: "Space-separated jobs to run now: 'issue-sweep', 'ai-ok' or both. Empty runs today's: ai-ok every day, after issue-sweep on Sundays (Auckland time)."
         type: string
         default: ""
       live:
@@ -21,7 +21,7 @@ on:
         type: string
         default: "0"
       config:
-        description: "TOML overriding ai-jobs/aij/defaults.toml for this repo: test command, uv sync args, coverage package, budgets and limits."
+        description: "TOML overriding ai-jobs/aij/defaults.toml for this repo: test command, uv sync args, reviewer, budgets and limits."
         type: string
         default: ""
       system-packages:
@@ -55,14 +55,9 @@ jobs:
           JOBS: ${{ inputs.jobs }}
         run: |
           if [ -z "$JOBS" ]; then
-            day=$(TZ=Pacific/Auckland date +%u)  # 1 = Monday
-            if [ "$GITHUB_REPOSITORY" = ucgmsim/meta-ci-action ]; then
-              [ "$day" = 7 ] && JOBS=ci-promote
-            else
-              JOBS=ai-ok
-              [ "$day" = 7 ] && JOBS="$JOBS lockfile lint ci-conformance issue-sweep"
-              [ "$day" = 3 ] && JOBS="$JOBS coverage mutants"
-            fi
+            JOBS=ai-ok
+            # Sundays: the sweep too.
+            [ "$(TZ=Pacific/Auckland date +%u)" = 7 ] && JOBS="issue-sweep ai-ok"
           fi
           echo "jobs=$(printf '%s\n' $JOBS | jq -Rnc '[inputs | select(. != "")]')" >> "$GITHUB_OUTPUT"
 
@@ -92,12 +87,8 @@ jobs:
 
       - uses: astral-sh/setup-uv@v6
 
+      # For repos with a crate: the tests and the CI gate build it, and run clippy and rustfmt.
       - run: rustup toolchain install stable --profile minimal --component clippy,rustfmt
-
-      - if: matrix.job == 'mutants'
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-mutants
 
       - name: Install the job code and Claude Code
         run: |
@@ -125,8 +116,8 @@ jobs:
           git config --global credential.https://github.com.helper ''
           git config --global --add credential.https://github.com.helper '!gh auth git-credential'
 
-      # Which files coverage, mutants and issue-sweep targeted recently. Every job saves a
-      # new entry, so the cache stays fresh between the weekly runs.
+      # Which files issue-sweep reviewed recently. Every job saves a new entry, so the daily
+      # ai-ok runs keep the cache fresh between the weekly sweeps.
       - uses: actions/cache/restore@v4
         with:
           path: .aij/state

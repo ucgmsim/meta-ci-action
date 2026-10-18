@@ -1,8 +1,6 @@
 # Org-wide defaults for the scheduled AI jobs. A repo overrides any of these in the
 # `config:` input of its ai-jobs caller workflow, as TOML (tables merge key by key).
 
-# The shared CI repo: ci-conformance compares against it, and ci-promote runs only there.
-meta_repo = "ucgmsim/meta-ci-action"
 # Only these people's `ai-ok` labels count. Issue text goes into a prompt and
 # the repos are public, so a label from anyone else is ignored.
 maintainers = ["lispandfound", "AndrewRidden-Harper", "joelridden", "claudio525", "sungeunbae"]
@@ -13,26 +11,13 @@ default = ""
 # Arguments to `uv sync`, and the test command run after it.
 sync = ["--all-extras", "--dev"]
 test = "uv run --no-sync pytest tests -q -x"
-pytest_paths = ["tests"]
-# lint also runs `ruff format` (only where CI checks formatting).
-ruff_format = false
-# lint uses the latest ruff, for repos whose CI runs an unpinned ruff action.
-ruff_latest = false
-# The import package coverage measures; "" skips the coverage job.
-cov_package = ""
-# Measure coverage ignoring the repo's own coverage config (for when it omits files worth testing).
-cov_ignore_omit = false
-# Directories of Python files the mutants job mutates.
-mut_python = []
-# A crate to mutate too: mut_rust = { package = "core", dir = "src-rust" }
 
-# Bot PRs needing review (anything but ai-chore). At the cap, PR jobs skip.
-# Each job also keeps at most one PR of its own open.
+# Open bot PRs at which ai-ok skips; it also keeps one PR per issue.
 max_open_review_prs = 3
-# Changed lines (lockfiles excluded) above which a PR is abandoned, not opened.
+# Changed lines (lockfiles excluded) above which a fix is abandoned, not opened.
 max_diff_lines = 300
 model = "claude-opus-5-5"
-timeout_minutes = 45  # per Claude run; per job in [timeouts]
+timeout_minutes = 45  # per Claude run
 # A repo's test command, and the CI gate (.ai/ci-checks, tests excluded), per run.
 test_timeout_minutes = 60
 ci_checks_timeout_minutes = 30
@@ -45,34 +30,12 @@ max_open_suggestions = 10
 auto_ai_ok = true
 # People @-mentioned on critical/high bugs, besides the reviewer they're assigned to.
 serious_mentions = []
-# Files with fewer uncovered lines than this are not coverage targets.
-min_missing_lines = 5
-# Don't revisit a coverage/mutation/sweep target for this many days.
+# Don't sweep a file again for this many days.
 rotate_days = 56
-mutation_timeout_minutes = 40
-# Source files shorter than this many lines are not mutation targets.
-mut_min_lines = 40
-# Claude repair rounds ci-conformance gets for checks its first run left failing.
-ci_repair_attempts = 2
-# Ref of meta-ci-action whose lefthook/ci.yml gate the jobs run as `.ai/ci-checks`:
+# Ref of meta-ci-action whose lefthook/ci.yml gate the fixes must pass (`.ai/ci-checks`):
 # the same tag repos pin their CI and lefthook.yml to.
 lefthook_ref = "v2"
 
 [budgets]  # USD per Claude run
-lockfile = 20  # only when an upgraded ruff/ty flags code its autofixes can't fix
 ai-ok = 20
-coverage = 20
-mutants = 20
 issue-sweep = 20
-ci-conformance = 20  # the first run plus its repair runs; ci-promote uses this too
-
-[diff_limits]  # changed lines per job, overriding max_diff_lines
-# Fixing a repo's checks (docstrings, types) can take more than a fix PR. The script's
-# own commits (hook adoption, formatter autofixes) don't count towards this.
-ci-conformance = 800
-
-[timeouts]  # minutes per Claude run, overriding timeout_minutes
-# Runs the full CI gate (minutes on its own) several times, plus the tests.
-ci-conformance = 75
-
-[models]  # per-job override of `model`

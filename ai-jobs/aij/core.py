@@ -20,16 +20,13 @@ from . import ghapp
 
 HERE = Path(__file__).resolve().parent  # prompts/ and defaults.toml
 DATA = Path(os.environ.get("AIJ_DATA", Path(tempfile.gettempdir()) / "aij"))
-WORK = DATA / "work"  # the bot's clones: the repo, and meta-ci-action for the CI jobs
+WORK = DATA / "work"  # the bot's clone of the repo
 LOG_DIR = DATA / "logs"  # the job log, Claude's JSON results, dry-run patches and PR text; uploaded as an artifact
 STATE_DIR = DATA / "state"  # rotation state, kept between runs in the Actions cache
 LOCKFILES = {"uv.lock", "Cargo.lock"}
 LABELS = {
     "ai-generated": ("5319e7", "Opened by the scheduled Claude jobs"),
-    "ai-chore": ("c5def5", "Mechanical bot PR (lockfile, lint)"),
     "ai-fix": ("fbca04", "Bot-written fix that needs review"),
-    "ai-tests": ("bfd4f2", "Bot-written tests (coverage or mutation) that need review"),
-    "ai-ci": ("f9d0c4", "Bot-written CI change that needs review"),
     "ai-ok": ("0e8a16", "Vetted: the bot may attempt a fix"),
     "ai-stuck": ("d93f0b", "The bot tried and gave up; see its comment"),
     "ai-suggested": ("d4c5f9", "Filed by the weekly issue sweep"),
@@ -85,10 +82,6 @@ class Repo:
     def default(self) -> str:
         return self.cfg["default"]
 
-    @property
-    def is_meta(self) -> bool:
-        return self.slug == self.cfg["meta_repo"]
-
 
 def merge(base: dict, over: dict) -> dict:
     """base with over's keys on top; tables such as budgets are merged key by key."""
@@ -107,12 +100,6 @@ def load_repo(slug: str, config: str = "") -> Repo:
     cfg = merge(tomllib.loads((HERE / "defaults.toml").read_text()), tomllib.loads(config))
     cfg["default"] = cfg["default"] or default_branch(slug)
     return Repo(slug, cfg)
-
-
-def meta_repo(repo: Repo) -> Repo:
-    """meta-ci-action, as a second clone for the CI jobs (only its default branch matters)."""
-    slug = repo.cfg["meta_repo"]
-    return repo if repo.is_meta else Repo(slug, repo.cfg | {"default": default_branch(slug)})
 
 
 @dataclass
@@ -190,22 +177,6 @@ def is_test_path(path: str) -> bool:
     return "tests" in p.parts or "test" in p.parts or p.name.startswith("test_") or p.name == "conftest.py"
 
 
-def ranges(lines: list[int]) -> str:
-    """[1, 2, 3, 7] -> '1-3, 7'."""
-    out, start, prev = [], None, None
-    for n in sorted(lines):
-        if start is None:
-            start = prev = n
-        elif n == prev + 1:
-            prev = n
-        else:
-            out.append(f"{start}-{prev}" if start != prev else str(start))
-            start = prev = n
-    if start is not None:
-        out.append(f"{start}-{prev}" if start != prev else str(start))
-    return ", ".join(out)
-
-
 def today() -> str:
     return dt.date.today().isoformat()
 
@@ -228,8 +199,8 @@ def prepare(repo: Repo, branch: str, base: str | None = None) -> None:
     # PyO3 .so for an already-installed editable package); drop everything else.
     sh(["git", "clean", "-fdxq", "-e", ".venv", "-e", "target", "-e", "*.so", "-e", "*.pyd"], cwd=repo.path)
     exclude = repo.path / ".git/info/exclude"
-    if "mutants/" not in exclude.read_text():
-        exclude.write_text(exclude.read_text() + "\n.ai/\nmutants/\n")
+    if ".ai/" not in exclude.read_text():
+        exclude.write_text(exclude.read_text() + "\n.ai/\n")
     (repo.path / ".ai").mkdir(exist_ok=True)
     write_ci_checks(repo)
 
@@ -296,31 +267,10 @@ def run_gate(repo: Repo) -> tuple[set[str], str]:
     return set(re.findall(r"^(?:✗|🥊)\s+(\S+) \(", out, re.MULTILINE)), out
 
 
-def gate_report(failing: set[str], output: str, limit: int = 12000) -> str:
-    """The gate result for a prompt: which checks fail, then the output (tail-trimmed)."""
-    if not failing:
-        return "All of the shared CI's checks pass (tests aside; the script runs those)."
-    text = output if len(output) <= limit else "(trimmed)\n" + output[-limit:]
-    return f"Failing: {', '.join(sorted(failing))}\n\n```\n{text}\n```"
-
-
 def no_new_failures(repo: Repo, before: set[str]) -> None:
     """Tests passing isn't enough: CI also runs lint and type checks. Skip if the change broke one."""
     if new := failing_checks(repo) - before:
         raise Skip(f"the change makes these checks fail: {sorted(new)}")
-
-
-def dirty(repo: Repo) -> bool:
-    return bool(sh(["git", "status", "--porcelain"], cwd=repo.path).stdout.strip())
-
-
-def dirty_path(repo: Repo, path: str) -> bool:
-    return bool(sh(["git", "status", "--porcelain", "--", path], cwd=repo.path).stdout.strip())
-
-
-def changed_paths(repo: Repo) -> list[str]:
-    sh(["git", "add", "-A"], cwd=repo.path)
-    return sh(["git", "diff", "--cached", "--name-only"], cwd=repo.path).stdout.split()
 
 
 def commits_ahead(repo: Repo) -> int:
@@ -334,13 +284,10 @@ def open_bot_prs(repo: Repo, label: str) -> list[dict]:
     )  # fmt: skip
 
 
-def check_cap(repo: Repo, prefix: str | None = None) -> None:
-    """Skip when the repo is at its review-PR cap, or this job already has a PR open."""
-    prs = [pr for pr in open_bot_prs(repo, "ai-generated") if all(lbl["name"] != "ai-chore" for lbl in pr["labels"])]
-    if len(prs) >= repo.cfg["max_open_review_prs"]:
+def check_cap(repo: Repo) -> None:
+    """Skip when the repo is at its cap of open bot PRs."""
+    if len(open_bot_prs(repo, "ai-generated")) >= repo.cfg["max_open_review_prs"]:
         raise Skip(f"at the cap of {repo.cfg['max_open_review_prs']} open review PRs")
-    if prefix and (mine := [pr["url"] for pr in prs if pr["headRefName"].startswith(prefix)]):
-        raise Skip(f"this job's last PR is still open: {mine[0]}")
 
 
 def ensure_labels(repo: Repo) -> None:
@@ -380,16 +327,6 @@ def create_issue(repo: Repo, title: str, body: str, labels: list[str], live: boo
     return url
 
 
-def file_bug_report(repo: Repo, job: str, live: bool) -> str:
-    """Turn .ai/bug-report.md, written by a test-writing job, into an ai-suggested issue."""
-    report = repo.path / ".ai/bug-report.md"
-    if not report.exists():
-        return ""
-    title, _, body = report.read_text().strip().partition("\n")
-    body = f"{body.strip()}\n\n_Found by the scheduled `{job}` job while writing tests; needs triage._"
-    return " | bug filed: " + create_issue(repo, title.lstrip("# ").strip()[:120], body, ["ai-suggested"], live)
-
-
 def pr_text(repo: Repo) -> tuple[str, str]:
     """Read Claude's .ai/pr-title and .ai/pr-body.md, or skip with its .ai/skip-reason."""
     ai = repo.path / ".ai"
@@ -409,32 +346,6 @@ def skip_reason(repo: Repo) -> str:
     return path.read_text().strip() if path.exists() else ""
 
 
-def apply_deletions(repo: Repo, prefix: str) -> list[str]:
-    """Delete the files Claude listed in .ai/delete (it has no rm).
-
-    Untracked files (Claude's own scratch files) may go from anywhere in the repo;
-    tracked files only from under `prefix`.
-    """
-    listing = repo.path / ".ai/delete"
-    if not listing.exists():
-        return []
-    deleted = []
-    root = repo.path.resolve()
-    for line in listing.read_text().split():
-        target = (repo.path / line).resolve()
-        if not target.is_relative_to(root) or not target.is_file():
-            Log.write(f"ignoring delete request for {line!r}: outside the repo or missing")
-            continue
-        tracked = sh(["git", "ls-files", "--error-unmatch", str(target)], cwd=repo.path, check=False).returncode == 0
-        if tracked and not target.is_relative_to((repo.path / prefix).resolve()):
-            raise Skip(f"Claude asked to delete tracked file {line!r}, which is outside {prefix}")
-        target.unlink()
-        deleted.append(line)
-    listing.unlink()
-    Log.write(f"deleted at Claude's request: {deleted}")
-    return deleted
-
-
 def cost_line(runs: list[dict]) -> str:
     cost = sum(r.get("total_cost_usd", 0) for r in runs)
     turns = sum(r.get("num_turns") or 0 for r in runs)
@@ -448,7 +359,7 @@ NO_HOOKS = ["-c", "core.hooksPath=/dev/null"]
 
 def publish(
     repo: Repo, job: str, branch: str, title: str, body: str, labels: list[str],
-    live: bool, allowed=lambda path: True, count_lockfiles: bool = False, trailer: str = "",
+    live: bool, allowed=lambda path: True, trailer: str = "",
     draft: bool = False,
 ) -> str | None:  # fmt: skip
     """Check the working tree against the limits, then commit, push and open or update the PR.
@@ -466,7 +377,7 @@ def publish(
     for line in numstat:
         added, removed, path = line.split("\t", 2)
         paths.append(path)
-        if count_lockfiles or Path(path).name not in LOCKFILES:
+        if Path(path).name not in LOCKFILES:
             size += int(added if added != "-" else 0) + int(removed if removed != "-" else 0)
     if bad := [p for p in paths if not allowed(p)]:
         raise Skip(f"touches paths this job may not change: {bad}")
