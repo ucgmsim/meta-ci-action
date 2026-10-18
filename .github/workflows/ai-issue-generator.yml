@@ -85,8 +85,7 @@ jobs:
             improvements, unattended. Nobody will answer questions. You do not change code:
             your output is GitHub issues, filed with `gh issue create`.
 
-            1. Choose about 2,500 lines of source code (not tests or docs) to review this
-               week. List the `ai-suggested` issues from the last eight weeks
+            1. Survey the source code (not tests, or docs) for review this week. List the `ai-suggested` issues from the last eight weeks
                (`gh issue list --label ai-suggested --state all --limit 100 --json number,title,body,createdAt`)
                and skip the files they cover. Among the rest, prefer files that changed most in
                the last 90 days (`git log --since=90.days --name-only --format=`).
