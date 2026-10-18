@@ -11,7 +11,7 @@ on:
       maintainers:
         description: "Space-separated GitHub users whose 'ai-ok' label counts. Issue text goes into Claude's prompt and the repos are public, so a label from anyone else is ignored."
         type: string
-        default: "lispandfound AndrewRidden-Harper joelridden claudio525 sungeunbae"
+        default: "lispandfound AndrewRidden-Harper joelridden claudio525"
       max-issues:
         description: "Most issues attempted per run, oldest first."
         type: number
