@@ -8,6 +8,10 @@ Shared, reusable GitHub Actions workflows for `ucgmsim` Python repos:
   appears for repos containing a `Cargo.toml`.
 - **`claude-review.yml`** — an on-demand Claude PR review, triggered by a
   `@claude review` comment (never automatically on PR open/push).
+- **`ai-jobs.yml`** — scheduled repo maintenance by Claude as the org's GitHub
+  App: fixes for `ai-ok` issues, lockfile and lint PRs, CI conformance, an
+  issue sweep, and coverage and mutation-testing PRs. See
+  [`ai-jobs/README.md`](ai-jobs/README.md) for setup.
 - **`build-dist.yml`** — builds a release's sdist and wheels (one pure wheel,
   or a `cibuildwheel` matrix for repos with a `Cargo.toml`) as a single
   artifact, for the caller's PyPI publish job to upload.
