@@ -1,0 +1,199 @@
+name: AI test improver
+
+# Each run takes the least-covered source file, measures its coverage and mutation-tests
+# it with mutmut, and has Claude write tests for the uncovered lines and the surviving
+# mutants, as one tests-only PR. A bug the tests turn up is filed as an issue instead.
+# Called weekly from each repo's .github/workflows/ai.yml; see the README.
+
+on:
+  workflow_call:
+    inputs:
+      cov-package:
+        description: "Package measured for coverage ('--cov='), e.g. 'workflow'."
+        type: string
+        required: true
+      pytest-paths:
+        description: "Paths passed to pytest for the coverage and mutation runs."
+        type: string
+        default: "tests"
+      min-missing-lines:
+        description: "Files with fewer uncovered lines than this are not targets."
+        type: number
+        default: 5
+      mutation-timeout-minutes:
+        description: "Time limit for the mutmut run."
+        type: number
+        default: 40
+      reviewer:
+        description: "GitHub user asked to review the PR. Empty for nobody."
+        type: string
+        default: "lispandfound"
+      system-packages:
+        description: "Space-separated apt packages the repo's tests need (as for ci.yml)."
+        type: string
+        default: ""
+      uv-extra-args:
+        description: "Flags passed to 'uv sync'."
+        type: string
+        default: "--all-extras --dev"
+      test-command:
+        description: "The repo's test command."
+        type: string
+        default: "uv run --no-sync pytest tests -q -x"
+      model:
+        type: string
+        default: "claude-opus-5-5"
+      max-turns:
+        type: number
+        default: 150
+    secrets:
+      claude_code_oauth_token:
+        required: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      pull-requests: read
+    outputs:
+      go: ${{ steps.open.outputs.go }}
+    steps:
+      # One tests PR at a time: until it's merged or closed, a new run would pick the same file.
+      - id: open
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          R=$GITHUB_REPOSITORY
+          gh label create ai-generated -R "$R" --force --color 5319e7 --description "Opened by the scheduled Claude jobs"
+          gh label create ai-tests -R "$R" --force --color bfd4f2 --description "AI-written tests that need review"
+          gh label create ai-suggested -R "$R" --force --color d4c5f9 --description "Filed by the scheduled Claude jobs"
+          url=$(gh pr list -R "$R" --head ai/tests --state open --json url --jq '.[0].url // empty')
+          [ -n "$url" ] && echo "the last tests PR is still open: $url"
+          echo "go=$([ -z "$url" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
+  improve:
+    needs: check
+    if: needs.check.outputs.go == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    permissions:
+      contents: read
+      issues: write
+      pull-requests: write
+      id-token: write  # the Claude GitHub App's token, which Claude pushes and opens the PR with
+    steps:
+      - uses: actions/checkout@v6
+      - if: inputs.system-packages != ''
+        run: sudo apt-get update && sudo apt-get install -y ${{ inputs.system-packages }}
+      - uses: astral-sh/setup-uv@v6
+      - run: |
+          uv sync ${{ inputs.uv-extra-args }}
+          printf '.ai/\nmutants/\n' >> .git/info/exclude
+          mkdir -p .ai
+
+      - name: Measure coverage and pick the target
+        id: target
+        env:
+          COV_PACKAGE: ${{ inputs.cov-package }}
+          PYTEST_PATHS: ${{ inputs.pytest-paths }}
+          MIN: ${{ inputs.min-missing-lines }}
+        run: |
+          uv run --no-sync --with pytest-cov pytest $PYTEST_PATHS -q -p no:cacheprovider \
+            --cov="$COV_PACKAGE" --cov-report=json:.ai/coverage.json --cov-report=term-missing:skip-covered \
+            > .ai/coverage.txt || true
+          if [ ! -s .ai/coverage.json ]; then tail -50 .ai/coverage.txt; echo "::error::the coverage run produced no report"; exit 1; fi
+          target=$(jq -r --argjson min "$MIN" '.files | to_entries
+            | map(select((.key | test("(^|/)(tests?/|test_|conftest)") | not) and .value.summary.missing_lines >= $min))
+            | sort_by(.value.summary.percent_covered) | .[0].key // empty' .ai/coverage.json)
+          if [ -z "$target" ]; then echo "no file has $MIN or more uncovered lines"; exit 0; fi
+          jq -r --arg t "$target" '.files[$t] | "\(.summary.percent_covered | floor)% covered; uncovered lines: \(.missing_lines | map(tostring) | join(", "))"' \
+            .ai/coverage.json > .ai/target-coverage.txt
+          echo "target: $target ($(cat .ai/target-coverage.txt))"
+          echo "file=$target" >> "$GITHUB_OUTPUT"
+
+      # mutmut mutates only the target file; its config goes into pyproject.toml for the run.
+      - name: Mutation-test the target
+        if: steps.target.outputs.file != ''
+        env:
+          TARGET: ${{ steps.target.outputs.file }}
+          PYTEST_PATHS: ${{ inputs.pytest-paths }}
+          MINUTES: ${{ inputs.mutation-timeout-minutes }}
+        run: |
+          if grep -q '^\[tool.mutmut\]' pyproject.toml; then
+            echo "the repo has its own [tool.mutmut] config; skipping mutation testing" | tee .ai/survivors.txt
+            exit 0
+          fi
+          cp pyproject.toml .ai/pyproject.toml.orig
+          top=${TARGET%%/*}
+          cat >> pyproject.toml <<EOF
+
+          [tool.mutmut]
+          source_paths = ["$top"]
+          only_mutate = ["$TARGET"]
+          pytest_add_cli_args_test_selection = $(printf '%s\n' $PYTEST_PATHS | jq -Rnc '[inputs | select(. != "")]')
+          also_copy = ["$top"]
+          EOF
+          mutmut="uv run --no-sync --with mutmut mutmut"
+          timeout "${MINUTES}m" $mutmut run > .ai/mutmut-run.txt 2>&1 || echo "mutmut run ended early (exit $?)"
+          $mutmut results --all true > .ai/mutmut-results.txt 2>&1 || true
+          grep -oP '^\s*\K\S+(?=: survived$)' .ai/mutmut-results.txt > .ai/survived.txt || true
+          echo "$(wc -l < .ai/survived.txt) surviving mutants in $TARGET"
+          head -25 .ai/survived.txt | while read -r m; do $mutmut show "$m" || true; echo; done > .ai/survivors.txt
+          [ -s .ai/survivors.txt ] || echo "none (or mutmut checked no mutants; see .ai/mutmut-run.txt)" > .ai/survivors.txt
+          mv .ai/pyproject.toml.orig pyproject.toml
+          rm -rf mutants
+
+      - if: steps.target.outputs.file != ''
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.claude_code_oauth_token }}
+          prompt: |
+            You are strengthening the tests of ${{ github.repository }}, unattended. Nobody
+            will answer questions. Your output is one tests-only pull request.
+
+            Target: `${{ steps.target.outputs.file }}`. Its coverage is in
+            .ai/target-coverage.txt. Mutation testing changed it in small ways ("mutants"),
+            and the test suite still passed for each of those in .ai/survivors.txt: no test
+            checks the behaviour those mutants broke.
+
+            1. Read CLAUDE.md if it exists, then the target file and its existing tests.
+            2. Write tests that exercise the uncovered lines through the public behaviour of
+               the code: real inputs, meaningful assertions on outputs, errors raised for
+               invalid inputs. Don't write tests that only execute a line without checking
+               anything. Prefer a few thorough tests over many shallow ones, and follow the
+               existing test style, fixtures and hypothesis usage.
+            3. For each surviving mutant, decide whether the change matters. Some are
+               equivalent to the original (a bound that can never be reached, a log message);
+               skip those. For the rest, write tests that would fail under the mutant and pass
+               on the real code: exact values, boundary cases, error conditions.
+            4. Only add or change files under tests/ (including conftest.py). Never edit the
+               code under test. If a line can only be covered by changing the code, leave it.
+            5. Run the tests: `${{ inputs.test-command }}`. They must pass. Check coverage of
+               the target rose:
+               `uv run --no-sync --with pytest-cov pytest ${{ inputs.pytest-paths }} -q --cov=${{ inputs.cov-package }} --cov-report=term-missing`.
+               CI type-checks tests too: if a test deliberately passes input outside a type
+               hint, add a targeted `# ty: ignore[<rule>]` on that line saying why.
+            6. If a correct test shows the code is wrong (it crashes on valid input, returns
+               something its docstring says it shouldn't, or a mutant is *more* correct than
+               the original), don't write a test that locks in the wrong behaviour. First
+               check it hasn't been raised before, open or closed
+               (`gh issue list --state all --search "<keywords>"`), then file it:
+               `gh issue create --title "<title>" --body-file .ai/bug.md --label ai-suggested`,
+               with the location, a minimal reproducer and the expected versus actual result.
+               Keep going with the rest of the tests.
+            7. Open the PR:
+               - `git switch -c ai/tests`, commit, and `git push -u origin ai/tests`. Put
+                 scratch files under .ai/ only (it is git-ignored).
+               - Write .ai/pr-body.md: what behaviour the new tests pin down, the target's
+                 coverage before and after, which mutants the tests kill and which you judged
+                 equivalent and why, and any issue you filed.
+               - `gh pr create --title "<imperative, under 70 characters>" --body-file .ai/pr-body.md --label ai-generated,ai-tests`,
+                 adding `--reviewer ${{ inputs.reviewer }}` if "${{ inputs.reviewer }}" isn't empty.
+
+            If there is nothing worth testing (the lines are unreachable or trivially
+            defensive, and every surviving mutant is equivalent), open no PR and say why.
+          claude_args: |
+            --model ${{ inputs.model }}
+            --max-turns ${{ inputs.max-turns }}
+            --allowedTools "Read,Edit,Write,Glob,Grep,Bash(uv run:*),Bash(cargo test:*),Bash(git:*),Bash(gh issue list:*),Bash(gh issue view:*),Bash(gh issue create:*),Bash(gh pr list:*),Bash(gh pr create:*)"

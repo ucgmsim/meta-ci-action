@@ -1,3 +1,0 @@
-#!/bin/sh
-# The job code, run with the venv the ai-jobs workflow made (ruamel.yaml, pyjwt).
-PYTHONPATH="$AIJ_HOME" exec "$AIJ_VENV/bin/python" -m aij "$@"

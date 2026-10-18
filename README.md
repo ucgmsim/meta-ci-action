@@ -8,9 +8,10 @@ Shared, reusable GitHub Actions workflows for `ucgmsim` Python repos:
   appears for repos containing a `Cargo.toml`.
 - **`claude-review.yml`** — an on-demand Claude PR review, triggered by a
   `@claude review` comment (never automatically on PR open/push).
-- **`ai-jobs.yml`** — scheduled issue work by Claude as the org's GitHub App:
-  a weekly sweep that files vetted issues, and daily fixes for issues a
-  maintainer labelled `ai-ok`. See [`ai-jobs/README.md`](ai-jobs/README.md).
+- **`ai-issue-generator.yml`**, **`ai-issue-solver.yml`**,
+  **`ai-test-improver.yml`** — scheduled Claude jobs: file vetted issues, fix
+  the ones a maintainer labels `ai-ok`, and add tests for poorly covered code
+  and surviving mutants. See [Usage: scheduled AI jobs](#usage-scheduled-ai-jobs).
 - **`build-dist.yml`** — builds a release's sdist and wheels (one pure wheel,
   or a `cibuildwheel` matrix for repos with a `Cargo.toml`) as a single
   artifact, for the caller's PyPI publish job to upload.
@@ -255,6 +256,111 @@ precedence over `[tool.cibuildwheel]` in `pyproject.toml`. To keep a setting
 in `pyproject.toml` instead, pass `''` for that input; empty inputs are not
 exported. There is no lefthook command for this workflow: it only builds
 release artifacts, so there is nothing to check before a push.
+
+## Usage: scheduled AI jobs
+
+Three reusable workflows run Claude on a schedule with
+[`anthropics/claude-code-action`](https://github.com/anthropics/claude-code-action),
+the action `claude-review.yml` uses. Claude works as the Claude GitHub App
+(`claude[bot]`), so its PRs run the repo's CI like anyone else's, and that CI
+is what checks them.
+
+| Workflow | When | What Claude does |
+|---|---|---|
+| `ai-issue-generator.yml` | Sundays | Reviews ~2,500 lines the recent `ai-suggested` issues didn't cover and files up to 5 vetted issues (`ai-suggested`; `ai-serious`, assigned to the reviewer, for a serious bug). It checks open and closed issues first, so it doesn't raise anything again. Skips while 10 `ai-suggested` issues are open. |
+| `ai-issue-solver.yml` | Wednesdays | Opens a PR (`ai/issue-<n>`) for each of the 3 oldest open issues a **maintainer** labelled `ai-ok` (anyone else's label is ignored, as is an issue that already has an open PR closing it): a failing test first, then the fix. It first checks the issue wasn't raised before and closed. Giving up, it comments why and swaps `ai-ok` for `ai-stuck`. |
+| `ai-test-improver.yml` | Wednesdays | Measures coverage, takes the least-covered file, mutation-tests it with mutmut, and opens one tests-only PR (`ai/tests`) for the uncovered lines and surviving mutants. A bug it finds is filed as an issue instead. Skips while its last PR is open. |
+
+Setup, once for the org:
+
+1. Install the [Claude GitHub App](https://github.com/apps/claude) on the repos
+   (it's already there wherever `claude-review.yml` works).
+2. Make the `CLAUDE_CODE_OAUTH_TOKEN` secret (from `claude setup-token`)
+   available to the repos, as for `claude-review.yml`.
+
+Then in each repo, one `.github/workflows/ai.yml` (the times are ~02:17 in
+Auckland; the crons are UTC):
+
+```yaml
+name: AI
+
+on:
+  schedule:
+    - cron: "17 13 * * 6"  # Sundays: issue generator
+    - cron: "17 13 * * 2"  # Wednesdays: issue solver and test improver
+  workflow_dispatch:
+    inputs:
+      run:
+        description: "Which job to run now"
+        type: choice
+        options: [issue-generator, issue-solver, test-improver]
+      issue:
+        description: "issue-solver: try this issue regardless of its labels (0: the oldest ai-ok issues)"
+        type: number
+        default: 0
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+  id-token: write  # for the Claude GitHub App
+
+jobs:
+  issue-generator:
+    if: github.event.schedule == '17 13 * * 6' || inputs.run == 'issue-generator'
+    uses: ucgmsim/meta-ci-action/.github/workflows/ai-issue-generator.yml@v2
+    secrets:
+      claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+    # with:
+    #   system-packages: "gmt libgmt-dev ghostscript"   # as in ci.yml
+    #   uv-extra-args: "--all-extras --dev"
+
+  issue-solver:
+    if: github.event.schedule == '17 13 * * 2' || inputs.run == 'issue-solver'
+    uses: ucgmsim/meta-ci-action/.github/workflows/ai-issue-solver.yml@v2
+    secrets:
+      claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+    with:
+      issue: ${{ inputs.issue || 0 }}
+      # test-command: "uv run --no-sync pytest tests -q -x"
+
+  test-improver:
+    if: github.event.schedule == '17 13 * * 2' || inputs.run == 'test-improver'
+    uses: ucgmsim/meta-ci-action/.github/workflows/ai-test-improver.yml@v2
+    secrets:
+      claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+    with:
+      cov-package: mypackage
+```
+
+Leave out a job to turn it off. The inputs every workflow takes:
+
+| Input | Default | Purpose |
+|---|---|---|
+| `system-packages` | `""` | apt packages the tests need, as for `ci.yml`. |
+| `uv-extra-args` | `"--all-extras --dev"` | Flags for `uv sync`. |
+| `reviewer` | `"lispandfound"` | Asked to review the PRs; assigned `ai-serious` issues. `""` for nobody. |
+| `model` | `"claude-opus-5-5"` | Claude model. |
+| `max-turns` | `150` | Turn limit per Claude run. |
+
+And per workflow:
+
+| Workflow | Input | Default | Purpose |
+|---|---|---|---|
+| generator | `max-issues` | `5` | Most issues filed per run. |
+| generator | `max-open-suggestions` | `10` | Skip while this many `ai-suggested` issues are open. |
+| solver | `maintainers` | the team | Space-separated users whose `ai-ok` label counts. |
+| solver | `max-issues` | `3` | Most issues attempted per run. |
+| solver | `issue` | `0` | Try one issue regardless of labels (a trial). |
+| solver, tests | `test-command` | `"uv run --no-sync pytest tests -q -x"` | The repo's test command. |
+| tests | `cov-package` | required | Package measured with `--cov=`. |
+| tests | `pytest-paths` | `"tests"` | Paths pytest runs for coverage and mutmut. |
+| tests | `min-missing-lines` | `5` | Files with fewer uncovered lines aren't targets. |
+| tests | `mutation-timeout-minutes` | `40` | Time limit for mutmut. |
+
+To try one, run it from the Actions tab (*AI → Run workflow*). GitHub turns off
+scheduled workflows in a public repo after 60 days without commits; turn it back
+on there too.
 
 ## Design principles
 

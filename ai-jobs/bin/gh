@@ -1,9 +1,0 @@
-#!/bin/sh
-# gh as the bot's GitHub App: ahead of the real gh on PATH, it hands every call a fresh
-# installation token (aij/ghapp.py). git's credential helper is `gh auth git-credential`, so
-# clones and pushes get the same token. Claude's session has no AIJ_GH_APP_KEY, so no token.
-if [ -z "${GH_TOKEN:-}" ] && [ -n "${AIJ_GH_APP_KEY:-}" ]; then
-  GH_TOKEN=$(aij gh-app token) || { echo "gh: couldn't mint a GitHub App token" >&2; exit 1; }
-  export GH_TOKEN
-fi
-exec "$AIJ_REAL_GH" "$@"
