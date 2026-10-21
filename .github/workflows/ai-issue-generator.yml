@@ -51,6 +51,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0  # git log, to find the files that changed most
+          persist-credentials: false  # Claude only reads the repo; it files issues with gh
       - if: inputs.system-packages != ''
         run: sudo apt-get update && sudo apt-get install -y ${{ inputs.system-packages }}
       - uses: astral-sh/setup-uv@v6
