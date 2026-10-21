@@ -2,7 +2,7 @@ name: AI issue solver
 
 # Claude opens a PR for each of the oldest issues a maintainer labelled `ai-ok`: a
 # failing test first, then the fix. Giving up comments on the issue and swaps `ai-ok` for
-# `ai-stuck`. The PR's own CI checks the result. Called weekly from each repo's
+# `ai-stuck`. The PR's own CI checks the result. Called daily from each repo's
 # .github/workflows/ai.yml; see the README.
 
 on:
@@ -118,7 +118,8 @@ jobs:
           uv sync ${{ inputs.uv-extra-args }}
           echo ".ai/" >> .git/info/exclude
 
-      - uses: anthropics/claude-code-action@v1
+      - id: claude
+        uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.claude_code_oauth_token }}
           prompt: |
@@ -183,3 +184,33 @@ jobs:
             --model ${{ inputs.model }}
             --max-turns ${{ inputs.max-turns }}
             --allowedTools "Read,Edit,Write,Glob,Grep,Bash(uv run:*),Bash(cargo test:*),Bash(cargo build:*),Bash(git:*),Bash(gh issue view:*),Bash(gh issue list:*),Bash(gh issue comment:*),Bash(gh issue edit:*),Bash(gh pr list:*),Bash(gh pr create:*)"
+
+      # A run that ends with neither a PR nor `ai-stuck` (turn limit, timeout, a crash)
+      # would leave the issue `ai-ok` and retry it every day. Park it as stuck instead.
+      - name: Mark the issue stuck if Claude left no PR and no reason
+        if: always() && inputs.issue == 0 && steps.claude.outcome != 'skipped'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          N: ${{ matrix.issue }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          R=$GITHUB_REPOSITORY
+          pr=$(gh pr list -R "$R" --head "ai/issue-$N" --state open --json url --jq '.[0].url // empty')
+          stuck=$(gh issue view "$N" -R "$R" --json labels --jq 'any(.labels[]; .name == "ai-stuck")')
+          if [ -z "$pr" ] && [ "$stuck" != true ]; then
+            gh issue comment "$N" -R "$R" --body "The AI issue solver stopped without opening a PR or giving a reason: $RUN_URL. Remove \`ai-stuck\` and re-add \`ai-ok\` to retry."
+            gh issue edit "$N" -R "$R" --remove-label ai-ok --add-label ai-stuck
+          fi
+
+      # Claude's own output is hidden from the log; put its final message, and any tool
+      # calls the allowlist refused, in the job summary so a run that did nothing says why.
+      - name: Summarise Claude's run
+        if: always() && steps.claude.outputs.execution_file != ''
+        env:
+          LOG: ${{ steps.claude.outputs.execution_file }}
+        run: |
+          jq -r '.[] | select(.type == "result")
+            | "### Claude: \(.subtype), \(.num_turns) turns, $\(.total_cost_usd * 100 | round / 100)\n\n\(.result // "(no final message)")\n"
+              + (if (.permission_denials // []) == [] then "" else
+                 "\nRefused tool calls:\n\n" + (.permission_denials | map("- \(.tool_name): `\(.tool_input | tojson | .[:200])`") | join("\n")) end)' \
+            "$LOG" >> "$GITHUB_STEP_SUMMARY"

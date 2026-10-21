@@ -267,9 +267,9 @@ is what checks them.
 
 | Workflow | When | What Claude does |
 |---|---|---|
-| `ai-issue-generator.yml` | Sundays | Reviews ~2,500 lines the recent `ai-suggested` issues didn't cover and files up to 5 vetted issues (`ai-suggested`; `ai-serious`, assigned to the reviewer, for a serious bug). It checks open and closed issues first, so it doesn't raise anything again. Skips while 10 `ai-suggested` issues are open. |
-| `ai-issue-solver.yml` | Wednesdays | Opens a PR (`ai/issue-<n>`) for each of the 3 oldest open issues a **maintainer** labelled `ai-ok` (anyone else's label is ignored, as is an issue that already has an open PR closing it): a failing test first, then the fix. It first checks the issue wasn't raised before and closed. Giving up, it comments why and swaps `ai-ok` for `ai-stuck`. |
-| `ai-test-improver.yml` | Wednesdays | Measures coverage, takes the least-covered file, mutation-tests it with mutmut, and opens one tests-only PR (`ai/tests`) for the uncovered lines and surviving mutants. A bug it finds is filed as an issue instead. Skips while its last PR is open. |
+| `ai-issue-generator.yml` | Sundays | Reviews ~2,500 lines the recent `ai-suggested` issues didn't cover and files up to 5 vetted issues (`ai-suggested`; `ai-serious`, assigned to the reviewer, for a serious bug). It checks open and closed issues first, so it doesn't raise anything again. |
+| `ai-issue-solver.yml` | Daily | Opens a PR (`ai/issue-<n>`) for each of the 3 oldest open issues a **maintainer** labelled `ai-ok` (anyone else's label is ignored, as is an issue that already has an open PR closing it): a failing test first, then the fix. It first checks the issue wasn't raised before and closed. Giving up, it comments why and swaps `ai-ok` for `ai-stuck`; a run that ends with neither a PR nor a reason (turn limit, timeout) gets `ai-stuck` too, so it isn't retried every day. |
+| `ai-test-improver.yml` | Daily | Measures coverage, takes the least-covered file, mutation-tests it with mutmut, and opens one tests-only PR (`ai/tests`) for the uncovered lines and surviving mutants. A bug it finds is filed as an issue instead. Skips while its last PR is open. |
 
 Setup, once for the org:
 
@@ -287,7 +287,7 @@ name: AI
 on:
   schedule:
     - cron: "17 13 * * 6"  # Sundays: issue generator
-    - cron: "17 13 * * 2"  # Wednesdays: issue solver and test improver
+    - cron: "17 13 * * *"  # Daily: issue solver and test improver
   workflow_dispatch:
     inputs:
       run:
@@ -316,16 +316,17 @@ jobs:
     #   uv-extra-args: "--all-extras --dev"
 
   issue-solver:
-    if: github.event.schedule == '17 13 * * 2' || inputs.run == 'issue-solver'
+    if: github.event.schedule == '17 13 * * *' || inputs.run == 'issue-solver'
     uses: ucgmsim/meta-ci-action/.github/workflows/ai-issue-solver.yml@v2
     secrets:
       claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
     with:
-      issue: ${{ inputs.issue || 0 }}
+      # A dispatch passes the number as a string, which a number input rejects.
+      issue: ${{ fromJSON(inputs.issue || '0') }}
       # test-command: "uv run --no-sync pytest tests -q -x"
 
   test-improver:
-    if: github.event.schedule == '17 13 * * 2' || inputs.run == 'test-improver'
+    if: github.event.schedule == '17 13 * * *' || inputs.run == 'test-improver'
     uses: ucgmsim/meta-ci-action/.github/workflows/ai-test-improver.yml@v2
     secrets:
       claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -348,7 +349,6 @@ And per workflow:
 | Workflow | Input | Default | Purpose |
 |---|---|---|---|
 | generator | `max-issues` | `5` | Most issues filed per run. |
-| generator | `max-open-suggestions` | `10` | Skip while this many `ai-suggested` issues are open. |
 | solver | `maintainers` | the team | Space-separated users whose `ai-ok` label counts. |
 | solver | `max-issues` | `3` | Most issues attempted per run. |
 | solver | `issue` | `0` | Try one issue regardless of labels (a trial). |
@@ -357,6 +357,9 @@ And per workflow:
 | tests | `pytest-paths` | `"tests"` | Paths pytest runs for coverage and mutmut. |
 | tests | `min-missing-lines` | `5` | Files with fewer uncovered lines aren't targets. |
 | tests | `mutation-timeout-minutes` | `40` | Time limit for mutmut. |
+
+Each run's job summary has Claude's final message and any tool calls its
+allowlist refused, so a run that opened nothing says why.
 
 To try one, run it from the Actions tab (*AI → Run workflow*). GitHub turns off
 scheduled workflows in a public repo after 60 days without commits; turn it back
