@@ -20,10 +20,6 @@ on:
         description: "Most issues filed per run."
         type: number
         default: 5
-      max-open-suggestions:
-        description: "Skip the run while this many 'ai-suggested' issues are open."
-        type: number
-        default: 10
       reviewer:
         description: "GitHub user assigned 'ai-serious' issues. Empty for nobody."
         type: string
@@ -39,27 +35,7 @@ on:
         required: true
 
 jobs:
-  check:
-    runs-on: ubuntu-latest
-    permissions:
-      issues: write
-    outputs:
-      go: ${{ steps.cap.outputs.go }}
-    steps:
-      - id: cap
-        env:
-          GH_TOKEN: ${{ github.token }}
-          MAX_OPEN: ${{ inputs.max-open-suggestions }}
-        run: |
-          gh label create ai-suggested -R "$GITHUB_REPOSITORY" --force --color d4c5f9 --description "Filed by the AI issue generator"
-          gh label create ai-serious -R "$GITHUB_REPOSITORY" --force --color b60205 --description "The AI issue generator found a serious bug; needs a human"
-          open=$(gh issue list -R "$GITHUB_REPOSITORY" --label ai-suggested --state open --limit 200 --json number --jq length)
-          echo "$open ai-suggested issues open (limit $MAX_OPEN)"
-          echo "go=$([ "$open" -lt "$MAX_OPEN" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
-
   generate:
-    needs: check
-    if: needs.check.outputs.go == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 120
     permissions:
@@ -67,6 +43,11 @@ jobs:
       issues: write
       id-token: write  # the Claude GitHub App's token, which Claude files the issues with
     steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh label create ai-suggested -R "$GITHUB_REPOSITORY" --force --color d4c5f9 --description "Filed by the AI issue generator"
+          gh label create ai-serious -R "$GITHUB_REPOSITORY" --force --color b60205 --description "The AI issue generator found a serious bug; needs a human"
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0  # git log, to find the files that changed most
@@ -77,7 +58,8 @@ jobs:
           uv sync ${{ inputs.uv-extra-args }}
           echo ".ai/" >> .git/info/exclude
 
-      - uses: anthropics/claude-code-action@v1
+      - id: claude
+        uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.claude_code_oauth_token }}
           prompt: |
@@ -123,3 +105,16 @@ jobs:
             --model ${{ inputs.model }}
             --max-turns ${{ inputs.max-turns }}
             --allowedTools "Read,Write,Glob,Grep,Bash(uv run:*),Bash(git log:*),Bash(git ls-files:*),Bash(gh issue list:*),Bash(gh issue view:*),Bash(gh issue create:*),Bash(gh pr list:*)"
+
+      # Claude's own output is hidden from the log; put its final message, and any tool
+      # calls the allowlist refused, in the job summary so a run that did nothing says why.
+      - name: Summarise Claude's run
+        if: always() && steps.claude.outputs.execution_file != ''
+        env:
+          LOG: ${{ steps.claude.outputs.execution_file }}
+        run: |
+          jq -r '.[] | select(.type == "result")
+            | "### Claude: \(.subtype), \(.num_turns) turns, $\(.total_cost_usd * 100 | round / 100)\n\n\(.result // "(no final message)")\n"
+              + (if (.permission_denials // []) == [] then "" else
+                 "\nRefused tool calls:\n\n" + (.permission_denials | map("- \(.tool_name): `\(.tool_input | tojson | .[:200])`") | join("\n")) end)' \
+            "$LOG" >> "$GITHUB_STEP_SUMMARY"

@@ -3,7 +3,7 @@ name: AI test improver
 # Each run takes the least-covered source file, measures its coverage and mutation-tests
 # it with mutmut, and has Claude write tests for the uncovered lines and the surviving
 # mutants, as one tests-only PR. A bug the tests turn up is filed as an issue instead.
-# Called weekly from each repo's .github/workflows/ai.yml; see the README.
+# Called daily from each repo's .github/workflows/ai.yml; see the README.
 
 on:
   workflow_call:
@@ -113,6 +113,8 @@ jobs:
           echo "file=$target" >> "$GITHUB_OUTPUT"
 
       # mutmut mutates only the target file; its config goes into pyproject.toml for the run.
+      # It copies the whole checkout into mutants/, as tests can load files outside the
+      # package (e.g. scripts/).
       - name: Mutation-test the target
         if: steps.target.outputs.file != ''
         env:
@@ -132,10 +134,12 @@ jobs:
           source_paths = ["$top"]
           only_mutate = ["$TARGET"]
           pytest_add_cli_args_test_selection = $(printf '%s\n' $PYTEST_PATHS | jq -Rnc '[inputs | select(. != "")]')
-          also_copy = ["$top"]
+          also_copy = $(git ls-files | cut -d/ -f1 | sort -u | jq -Rnc '[inputs | select(. != "")]')
           EOF
           mutmut="uv run --no-sync --with mutmut mutmut"
-          timeout "${MINUTES}m" $mutmut run > .ai/mutmut-run.txt 2>&1 || echo "mutmut run ended early (exit $?)"
+          if ! timeout "${MINUTES}m" $mutmut run > .ai/mutmut-run.txt 2>&1; then
+            echo "mutmut run ended early; its last lines:"; tail -15 .ai/mutmut-run.txt
+          fi
           $mutmut results --all true > .ai/mutmut-results.txt 2>&1 || true
           grep -oP '^\s*\K\S+(?=: survived$)' .ai/mutmut-results.txt > .ai/survived.txt || true
           echo "$(wc -l < .ai/survived.txt) surviving mutants in $TARGET"
@@ -144,7 +148,8 @@ jobs:
           mv .ai/pyproject.toml.orig pyproject.toml
           rm -rf mutants
 
-      - if: steps.target.outputs.file != ''
+      - id: claude
+        if: steps.target.outputs.file != ''
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.claude_code_oauth_token }}
@@ -197,3 +202,16 @@ jobs:
             --model ${{ inputs.model }}
             --max-turns ${{ inputs.max-turns }}
             --allowedTools "Read,Edit,Write,Glob,Grep,Bash(uv run:*),Bash(cargo test:*),Bash(git:*),Bash(gh issue list:*),Bash(gh issue view:*),Bash(gh issue create:*),Bash(gh pr list:*),Bash(gh pr create:*)"
+
+      # Claude's own output is hidden from the log; put its final message, and any tool
+      # calls the allowlist refused, in the job summary so a run that did nothing says why.
+      - name: Summarise Claude's run
+        if: always() && steps.claude.outputs.execution_file != ''
+        env:
+          LOG: ${{ steps.claude.outputs.execution_file }}
+        run: |
+          jq -r '.[] | select(.type == "result")
+            | "### Claude: \(.subtype), \(.num_turns) turns, $\(.total_cost_usd * 100 | round / 100)\n\n\(.result // "(no final message)")\n"
+              + (if (.permission_denials // []) == [] then "" else
+                 "\nRefused tool calls:\n\n" + (.permission_denials | map("- \(.tool_name): `\(.tool_input | tojson | .[:200])`") | join("\n")) end)' \
+            "$LOG" >> "$GITHUB_STEP_SUMMARY"
