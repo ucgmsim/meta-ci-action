@@ -83,7 +83,12 @@ jobs:
       pull-requests: write
       id-token: write  # the Claude GitHub App's token, which Claude pushes and opens the PR with
     steps:
+      # Don't leave the read-only GITHUB_TOKEN in git config: checkout v6 keeps it behind an
+      # includeIf entry that claude-code-action doesn't clear, so it overrides the Claude
+      # App token and pushes fail with 403 as github-actions[bot].
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - if: inputs.system-packages != ''
         run: sudo apt-get update && sudo apt-get install -y ${{ inputs.system-packages }}
       - uses: astral-sh/setup-uv@v6
