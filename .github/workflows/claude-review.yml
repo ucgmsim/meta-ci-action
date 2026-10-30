@@ -56,5 +56,5 @@ jobs:
             do not push commits, do not approve or request changes.
           claude_args: |
             --model claude-sonnet-5
-            --max-turns 40
+            --max-turns 80
             --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Bash(git log:*),Bash(git diff:*)"
