@@ -1,9 +1,9 @@
 name: AI issue generator
 
 # Claude reviews part of the repo and files a few vetted issues (`ai-suggested`;
-# `ai-serious` for a bug that needs a human soon). A maintainer labels the ones worth
-# fixing `ai-ok`, and ai-issue-solver.yml picks them up. Called weekly from each repo's
-# .github/workflows/ai.yml; see the README.
+# `ai-serious` for a bug that needs a human soon). Each is filed `ai-ok`, so
+# ai-issue-solver.yml attempts it; a maintainer who doesn't want the change closes the
+# PR and the issue. Called weekly from each repo's .github/workflows/ai.yml; see the README.
 
 on:
   workflow_call:
@@ -48,6 +48,7 @@ jobs:
         run: |
           gh label create ai-suggested -R "$GITHUB_REPOSITORY" --force --color d4c5f9 --description "Filed by the AI issue generator"
           gh label create ai-serious -R "$GITHUB_REPOSITORY" --force --color b60205 --description "The AI issue generator found a serious bug; needs a human"
+          gh label create ai-ok -R "$GITHUB_REPOSITORY" --force --color 0e8a16 --description "Vetted: the AI issue solver may attempt a fix"
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0  # git log, to find the files that changed most
@@ -92,7 +93,7 @@ jobs:
                better than many speculative ones. File nothing if you found nothing solid.
 
             File each one with
-            `gh issue create --title "<title>" --body-file .ai/issue-<n>.md --label ai-suggested`.
+            `gh issue create --title "<title>" --body-file .ai/issue-<n>.md --label ai-suggested --label ai-ok`.
             The title is short and specific. The body gives the location (file:line), what is
             wrong, the reproducer and its output, and a suggested fix. End the body with a line
             "_Filed by the AI issue generator. Kind: <bug|tests|refactor|docs>, severity: <critical|high|medium|low>._"
