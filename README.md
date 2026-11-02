@@ -10,8 +10,8 @@ Shared, reusable GitHub Actions workflows for `ucgmsim` Python repos:
   `@claude review` comment (never automatically on PR open/push).
 - **`ai-issue-generator.yml`**, **`ai-issue-solver.yml`**,
   **`ai-test-improver.yml`** — scheduled Claude jobs: file vetted issues, fix
-  the ones a maintainer labels `ai-ok`, and add tests for poorly covered code
-  and surviving mutants. See [Usage: scheduled AI jobs](#usage-scheduled-ai-jobs).
+  them (and any a maintainer labels `ai-ok`), and add tests that kill surviving
+  mutants. See [Usage: scheduled AI jobs](#usage-scheduled-ai-jobs).
 - **`build-dist.yml`** — builds a release's sdist and wheels (one pure wheel,
   or a `cibuildwheel` matrix for repos with a `Cargo.toml`) as a single
   artifact, for the caller's PyPI publish job to upload.
@@ -267,9 +267,9 @@ is what checks them.
 
 | Workflow | When | What Claude does |
 |---|---|---|
-| `ai-issue-generator.yml` | Sundays | Reviews ~2,500 lines the recent `ai-suggested` issues didn't cover and files up to 5 vetted issues (`ai-suggested`; `ai-serious`, assigned to the reviewer, for a serious bug). It checks open and closed issues first, so it doesn't raise anything again. |
-| `ai-issue-solver.yml` | Daily | Opens a PR (`ai/issue-<n>`) for each of the 3 oldest open issues a **maintainer** labelled `ai-ok` (anyone else's label is ignored, as is an issue that already has an open PR closing it): a failing test first, then the fix. It first checks the issue wasn't raised before and closed. Giving up, it comments why and swaps `ai-ok` for `ai-stuck`; a run that ends with neither a PR nor a reason (turn limit, timeout) gets `ai-stuck` too, so it isn't retried every day. |
-| `ai-test-improver.yml` | Daily | Measures coverage, takes the least-covered file, mutation-tests it with mutmut, and opens one tests-only PR (`ai/tests`) for the uncovered lines and surviving mutants. A bug it finds is filed as an issue instead. Skips while its last PR is open. |
+| `ai-issue-generator.yml` | Sundays | Reviews ~2,500 lines the recent `ai-suggested` issues didn't cover and files up to 5 vetted issues (`ai-suggested`; `ai-serious`, assigned to the reviewer, for a serious bug), all labelled `ai-ok` so the solver attempts them. Close the PR and the issue to turn one down. It checks open and closed issues first, so it doesn't raise anything again. |
+| `ai-issue-solver.yml` | Daily | Opens a PR (`ai/issue-<n>`) for each of the 3 oldest open `ai-ok` issues that a **maintainer** labelled or the AI jobs filed themselves (anyone else's label is ignored, as is an issue that already has an open PR closing it; only the maintainers' and the bots' comments reach Claude): a failing test first, then the fix. It first checks the issue wasn't raised before and closed. Giving up, it comments why and swaps `ai-ok` for `ai-stuck`; a run that ends with neither a PR nor a reason (turn limit, timeout) gets `ai-stuck` too, so it isn't retried every day. |
+| `ai-test-improver.yml` | Daily | Mutation-tests the source files with mutmut, starting from a different file each day, takes the first with 5 or more mutants that survive (or that no test runs), and opens one tests-only PR (`ai/tests`) that kills them and covers the file's uncovered lines. A bug it finds is filed as an `ai-ok` issue instead. Skips while an `ai-tests` PR is open. |
 
 Setup, once for the org:
 
@@ -350,13 +350,14 @@ And per workflow:
 |---|---|---|---|
 | generator | `max-issues` | `5` | Most issues filed per run. |
 | solver | `maintainers` | the team | Space-separated users whose `ai-ok` label counts. |
+| solver | `trusted-bots` | `"claude[bot] ucgmsim[bot]"` | Accounts the AI jobs file issues as; their `ai-ok` counts on issues they opened. |
 | solver | `max-issues` | `3` | Most issues attempted per run. |
 | solver | `issue` | `0` | Try one issue regardless of labels (a trial). |
 | solver, tests | `test-command` | `"uv run --no-sync pytest tests -q -x"` | The repo's test command. |
 | tests | `cov-package` | required | Package measured with `--cov=`. |
 | tests | `pytest-paths` | `"tests"` | Paths pytest runs for coverage and mutmut. |
-| tests | `min-missing-lines` | `5` | Files with fewer uncovered lines aren't targets. |
-| tests | `mutation-timeout-minutes` | `40` | Time limit for mutmut. |
+| tests | `min-mutants` | `5` | Surviving or untested mutants a file needs to be the target. |
+| tests | `mutation-timeout-minutes` | `40` | Time limit for mutmut, across every file tried in a run. |
 
 Each run's job summary has Claude's final message and any tool calls its
 allowlist refused, so a run that opened nothing says why.
