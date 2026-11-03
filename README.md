@@ -44,7 +44,8 @@ jobs:
 | Input | Default | Purpose |
 |---|---|---|
 | `python-version` | `"3.13"` | Interpreter version for the docstring job's `setup-python` step. It parses the code under test, so it must be at least as new as the syntax that code uses. |
-| `package-dir` | `""` | Top-level package directory to lint for docstrings, e.g. `qcore`, `workflow`, `IM`. No longer required: leave it unset once `[tool.npdlint] include` names the same paths. |
+| `working-directory` | `"."` | Subdirectory holding this package's `pyproject.toml`/`Cargo.toml`, for a monorepo with more than one package. Leave as `"."` for a single-package repo. |
+| `package-dir` | `""` | Top-level package directory to lint for docstrings, relative to `working-directory`, e.g. `qcore`, `workflow`, `IM`. No longer required: leave it unset once `[tool.npdlint] include` names the same paths. |
 | `system-packages` | `""` | Space-separated apt packages installed before the deptry/pytest/typecheck jobs (e.g. native libs like GMT or GDAL). |
 | `uv-extra-args` | `"--all-extras --dev"` | Extra flags passed to `uv sync` in the deptry/pytest/typecheck jobs. |
 | `numpydoc-extra-excludes` | `""` | **Deprecated.** Extra `-E` fdfind exclude fragments, e.g. `-E ccldpy.py`. Still honoured — each becomes an `npdlint --extend-exclude` — so a caller written for the old pipeline needs no edit, but `[tool.npdlint] extend-exclude` is the place for these now. |
@@ -91,6 +92,36 @@ jobs:
 Each job runs `uv sync` once and then `uv run --no-sync`, so the config
 settings applied at sync time are the ones the tests run against and no step
 silently rebuilds the crate.
+
+## Monorepos with more than one package
+
+Call `ci.yml` once per package, each as its own caller job with a distinct
+`working-directory`. Job names in the checks UI are automatically namespaced
+under the caller job id (e.g. `ci-oq-wrapper / pytest`, `ci-gm-models /
+pytest`), so branch protection can require each package's checks
+independently:
+
+```yaml
+name: CI
+on: [pull_request]
+
+jobs:
+  ci-oq-wrapper:
+    uses: ucgmsim/meta-ci-action/.github/workflows/ci.yml@main
+    with:
+      working-directory: oq_wrapper
+
+  ci-gm-models:
+    uses: ucgmsim/meta-ci-action/.github/workflows/ci.yml@main
+    with:
+      working-directory: gm_models
+```
+
+`detect`'s `Cargo.toml` search, `rust-cache`'s workspace, and every
+`uv`/`pytest`/`cargo`/`npdlint` invocation are scoped to `working-directory`,
+so a Rust-only package (`gm_models`) and a pure-Python one (`oq_wrapper`)
+sitting side by side each get the right jobs — the `rust` job only appears
+for the call whose `working-directory` actually contains a `Cargo.toml`.
 
 ## Usage: run CI locally with lefthook
 

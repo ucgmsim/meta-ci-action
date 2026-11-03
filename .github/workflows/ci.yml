@@ -7,8 +7,12 @@ on:
         description: "Python version to use for setup-python steps (docstring job only; other jobs get their interpreter via uv). It parses the code under test, so it must be at least as new as the syntax that code uses."
         type: string
         default: "3.13"
+      working-directory:
+        description: "Subdirectory containing this package's pyproject.toml/Cargo.toml, for monorepos with more than one package (e.g. 'oq_wrapper', 'gm_models'). Leave as '.' for a single-package repo. Call this workflow once per package, each with its own working-directory, from separate jobs in the caller."
+        type: string
+        default: "."
       package-dir:
-        description: "Top-level package directory to lint for docstrings, e.g. 'qcore', 'workflow', 'IM'. Optional now that npdlint reads '[tool.npdlint] include' from pyproject.toml; leave it unset once that is configured."
+        description: "Top-level package directory to lint for docstrings, relative to working-directory, e.g. 'qcore', 'workflow', 'IM'. Optional now that npdlint reads '[tool.npdlint] include' from pyproject.toml; leave it unset once that is configured."
         type: string
         default: ""
       system-packages:
@@ -64,8 +68,10 @@ jobs:
       - uses: actions/checkout@v4
       - id: cargo
         shell: bash
+        env:
+          WORKING_DIRECTORY: ${{ inputs.working-directory }}
         run: |
-          if [ -n "$(find . -name Cargo.toml -not -path './target/*' -print -quit)" ]; then
+          if [ -n "$(find "$WORKING_DIRECTORY" -name Cargo.toml -not -path '*/target/*' -print -quit)" ]; then
             echo "has-rust=true" >> "$GITHUB_OUTPUT"
           else
             echo "has-rust=false" >> "$GITHUB_OUTPUT"
@@ -78,26 +84,33 @@ jobs:
       - name: ruff check
         uses: astral-sh/ruff-action@v4.1.0
         with:
-          version-file: "uv.lock"
+          src: ${{ inputs.working-directory }}
+          version-file: "${{ inputs.working-directory }}/uv.lock"
       - name: ruff format --check
         uses: astral-sh/ruff-action@v4.1.0
         with:
-          version-file: "uv.lock"
+          src: ${{ inputs.working-directory }}
+          version-file: "${{ inputs.working-directory }}/uv.lock"
           args: "format --check"
 
   deptry:
     needs: detect
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
     steps:
       - uses: actions/checkout@v4
       - if: needs.detect.outputs.has-rust == 'true'
         uses: dtolnay/rust-toolchain@stable
       - if: needs.detect.outputs.has-rust == 'true'
         uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ inputs.working-directory }}
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
-          cache-dependency-glob: "**/pyproject.toml"
+          cache-dependency-glob: "${{ inputs.working-directory }}/**/pyproject.toml"
       - if: inputs.system-packages != ''
         run: sudo apt-get update && sudo apt-get install -y ${{ inputs.system-packages }}
       - run: uv sync ${{ inputs.uv-extra-args }}
@@ -109,6 +122,9 @@ jobs:
   # protection rules naming it as a required check do not have to change.
   numpydoc-lint:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
     env:
       PACKAGE_DIR: ${{ inputs.package-dir }}
       EXTRA_EXCLUDES: ${{ inputs.numpydoc-extra-excludes }}
@@ -149,12 +165,17 @@ jobs:
     needs: detect
     if: needs.detect.outputs.has-rust == 'true'
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ inputs.working-directory }}
       - if: inputs.system-packages != ''
         run: sudo apt-get update && sudo apt-get install -y ${{ inputs.system-packages }}
       - name: cargo fmt --check
@@ -180,6 +201,9 @@ jobs:
   pytest:
     needs: detect
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
     env:
       PYTEST_PATHS: ${{ inputs.pytest-paths }}
     steps:
@@ -190,10 +214,12 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       - if: needs.detect.outputs.has-rust == 'true'
         uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ inputs.working-directory }}
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
-          cache-dependency-glob: "**/pyproject.toml"
+          cache-dependency-glob: "${{ inputs.working-directory }}/**/pyproject.toml"
       - run: uv sync ${{ inputs.uv-extra-args }}
       - name: Run tests
         if: ${{ !inputs.enable-coverage }}
@@ -212,11 +238,14 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: html-report
-          path: htmlcov
+          path: ${{ inputs.working-directory }}/htmlcov
 
   typecheck:
     needs: detect
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
     steps:
       - uses: actions/checkout@v4
       - if: inputs.system-packages != ''
@@ -225,6 +254,8 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
       - if: needs.detect.outputs.has-rust == 'true'
         uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ${{ inputs.working-directory }}
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
