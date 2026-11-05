@@ -1,0 +1,303 @@
+name: Criterion benchmarks
+description: >
+  Run a crate's criterion benchmarks on the PR's base and head back to back,
+  then post one sticky PR comment with a results table, the change
+  distributions, and per-benchmark timing distributions plotted for base vs
+  PR. On non-PR events it runs the head only and writes the job summary.
+
+inputs:
+  working-directory:
+    description: "Directory holding the crate's Cargo.toml, for monorepos (e.g. 'gm_models'). '.' for a single-crate repo."
+    default: "."
+  benches:
+    description: "Space-separated bench targets to run. Empty runs every [[bench]] target in the crate (found with cargo metadata). Targets are always named explicitly, never via a bare 'cargo bench', since libtest harnesses reject criterion's flags."
+    default: ""
+  cargo-args:
+    description: "Extra arguments for 'cargo bench' itself, e.g. '--features simd'."
+    default: ""
+  bench-args:
+    description: "Extra arguments passed to the criterion binary after '--', e.g. '--sample-size 50 --measurement-time 10'."
+    default: ""
+  threshold:
+    description: "Noise threshold in percent. A benchmark is only reported as slower or faster when the whole 95% confidence interval of its change lies beyond this. Shared CI runners jitter by a few percent, so criterion's own 1% default is too eager here."
+    default: "5"
+  system-packages:
+    description: "Space-separated apt packages to install first (e.g. native libraries the crate links against)."
+    default: ""
+  fail-on-regression:
+    description: "Fail the step when any benchmark is slower beyond the threshold."
+    default: "false"
+  plots-branch:
+    description: "Orphan branch the plot PNGs are committed to, so the comment can embed them. Needs 'contents: write'. Set to '' to skip images and post tables only."
+    default: "criterion-plots"
+  comment:
+    description: "Post (or update) a sticky PR comment. Needs 'pull-requests: write'."
+    default: "true"
+  title:
+    description: "Comment heading. Defaults to 'Criterion benchmarks', plus the working directory when it is not '.'."
+    default: ""
+  github-token:
+    description: "Token used to push plots and comment."
+    default: ${{ github.token }}
+
+outputs:
+  regressions:
+    description: "Number of benchmarks that got slower beyond the threshold."
+    value: ${{ steps.render.outputs.regressions }}
+  improvements:
+    description: "Number of benchmarks that got faster beyond the threshold."
+    value: ${{ steps.render.outputs.improvements }}
+
+runs:
+  using: composite
+  steps:
+    - uses: dtolnay/rust-toolchain@stable
+
+    - uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: ${{ inputs.working-directory }}
+        # Its own cache key: release-profile bench builds share nothing with
+        # the debug builds of the CI jobs.
+        key: criterion-bench
+
+    - uses: astral-sh/setup-uv@v6
+
+    - name: Install system packages
+      if: inputs.system-packages != ''
+      shell: bash
+      env:
+        PACKAGES: ${{ inputs.system-packages }}
+      run: sudo apt-get update && sudo apt-get install -y $PACKAGES
+
+    - name: Prepare
+      id: prep
+      shell: bash
+      env:
+        WD: ${{ inputs.working-directory }}
+        TITLE: ${{ inputs.title }}
+      run: |
+        crate_dir="$GITHUB_WORKSPACE/$WD"
+        slug=$(printf '%s' "$WD" | tr -c 'A-Za-z0-9._-' '-' | sed 's/^-*//; s/-*$//')
+        [ -z "$slug" ] || [ "$slug" = "." ] && slug=root
+        title="$TITLE"
+        if [ -z "$title" ]; then
+          title="Criterion benchmarks"
+          [ "$WD" != "." ] && title="$title · \`$WD\`"
+        fi
+        {
+          echo "crate-dir=$crate_dir"
+          echo "slug=$slug"
+          echo "title=$title"
+          # Both runs build into the head's target dir, so the base build warms
+          # the cache for the head build and rust-cache saves one directory.
+          echo "target-dir=$crate_dir/target"
+          echo "criterion-home=$RUNNER_TEMP/criterion-$slug"
+          echo "out=$RUNNER_TEMP/criterion-report-$slug"
+        } >> "$GITHUB_OUTPUT"
+
+    # Bench targets come from cargo metadata rather than a bare `cargo bench`:
+    # that would also run the lib's libtest harness, which rejects
+    # --save-baseline and fails the whole run.
+    - name: Find bench targets
+      id: targets
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        BENCHES: ${{ inputs.benches }}
+      run: |
+        if [ -z "$BENCHES" ]; then
+          BENCHES=$(cargo metadata --no-deps --format-version 1 --manifest-path Cargo.toml \
+            | jq -r '.packages[].targets[] | select(.kind | index("bench")) | .name' | sort -u | xargs)
+        fi
+        if [ -z "$BENCHES" ]; then
+          echo "::error::No [[bench]] targets found in $(pwd)/Cargo.toml."
+          exit 1
+        fi
+        echo "Bench targets: $BENCHES"
+        echo "benches=$BENCHES" >> "$GITHUB_OUTPUT"
+
+    - name: Benchmark base (${{ github.event.pull_request.base.ref }})
+      id: base
+      if: github.event_name == 'pull_request' || github.event_name == 'pull_request_target'
+      # A base that no longer builds, or predates the benches, still lets the
+      # head run: every benchmark is then reported as new.
+      continue-on-error: true
+      shell: bash
+      env:
+        BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        WD: ${{ inputs.working-directory }}
+        BENCHES: ${{ steps.targets.outputs.benches }}
+        CARGO_ARGS: ${{ inputs.cargo-args }}
+        BENCH_ARGS: ${{ inputs.bench-args }}
+        CARGO_TARGET_DIR: ${{ steps.prep.outputs.target-dir }}
+        CRITERION_HOME: ${{ steps.prep.outputs.criterion-home }}
+      run: |
+        base_src="$RUNNER_TEMP/criterion-base-src"
+        git fetch --no-tags --depth=1 origin "$BASE_SHA"
+        git worktree add --detach "$base_src" "$BASE_SHA"
+        cd "$base_src/$WD"
+        # Only the targets that exist on the base; the rest are new.
+        available=$(cargo metadata --no-deps --format-version 1 --manifest-path Cargo.toml \
+          | jq -r '.packages[].targets[] | select(.kind | index("bench")) | .name')
+        args=()
+        for bench in $BENCHES; do
+          if grep -qx "$bench" <<<"$available"; then args+=(--bench "$bench"); fi
+        done
+        if [ ${#args[@]} -eq 0 ]; then
+          echo "::notice::None of the bench targets exist on the base branch; reporting all as new."
+          exit 0
+        fi
+        cargo bench "${args[@]}" $CARGO_ARGS -- --save-baseline base $BENCH_ARGS
+        # --save-baseline also leaves a 'new' copy (and 'change' if criterion
+        # found an older run). Remove them, or a benchmark the PR deletes would
+        # still appear to have head results.
+        find "$CRITERION_HOME" -type d \( -name new -o -name change \) \
+          -exec test -e '{}/../base/benchmark.json' ';' -prune -exec rm -rf '{}' +
+
+    - name: Benchmark head
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        BENCHES: ${{ steps.targets.outputs.benches }}
+        CARGO_ARGS: ${{ inputs.cargo-args }}
+        BENCH_ARGS: ${{ inputs.bench-args }}
+        CARGO_TARGET_DIR: ${{ steps.prep.outputs.target-dir }}
+        CRITERION_HOME: ${{ steps.prep.outputs.criterion-home }}
+      run: |
+        if [ -d "$RUNNER_TEMP/criterion-base-src" ]; then
+          git worktree remove --force "$RUNNER_TEMP/criterion-base-src" || true
+        fi
+        args=()
+        for bench in $BENCHES; do args+=(--bench "$bench"); done
+        # Lenient: compare against 'base' where it exists, without failing on
+        # benchmarks the PR adds.
+        cargo bench "${args[@]}" $CARGO_ARGS -- --baseline-lenient base $BENCH_ARGS
+
+    - name: Render plots
+      id: render
+      shell: bash
+      env:
+        CRITERION_HOME: ${{ steps.prep.outputs.criterion-home }}
+        OUT: ${{ steps.prep.outputs.out }}
+        THRESHOLD: ${{ inputs.threshold }}
+      run: |
+        plots=$(uv run --no-project --python 3.13 --with 'matplotlib>=3.9' --with 'numpy>=2' \
+          python -I "$GITHUB_ACTION_PATH/report.py" plots \
+          --criterion-dir "$CRITERION_HOME" --out "$OUT/plots" --threshold "$THRESHOLD")
+        echo "plots=$plots" >> "$GITHUB_OUTPUT"
+        echo "regressions=$(jq .counts.slower "$OUT/plots/summary.json")" >> "$GITHUB_OUTPUT"
+        echo "improvements=$(jq .counts.faster "$OUT/plots/summary.json")" >> "$GITHUB_OUTPUT"
+
+    # GitHub comments cannot carry image attachments through the API, so the
+    # PNGs are committed to an orphan branch and linked by commit SHA, which
+    # keeps old comments' images intact when later runs push more.
+    - name: Publish plots
+      id: publish
+      if: inputs.plots-branch != '' && steps.render.outputs.plots != ''
+      continue-on-error: true
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        BRANCH: ${{ inputs.plots-branch }}
+        OUT: ${{ steps.prep.outputs.out }}
+        SLUG: ${{ steps.prep.outputs.slug }}
+        PR: ${{ github.event.pull_request.number }}
+      run: |
+        dest="${PR:+pr-$PR}"; dest="${dest:-$GITHUB_REF_NAME}/$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/$SLUG"
+        repo_dir="$RUNNER_TEMP/criterion-plots-repo"
+        rm -rf "$repo_dir" && git init -q "$repo_dir" && cd "$repo_dir"
+        git config user.name "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+        for attempt in 1 2 3 4 5; do
+          if git fetch -q --depth=1 origin "$BRANCH"; then
+            git checkout -q -B "$BRANCH" FETCH_HEAD
+          else
+            git checkout -q --orphan "$BRANCH"
+            printf '# %s\n\nPlots for criterion benchmark PR comments, written by\nucgmsim/meta-ci-action/criterion-bench. Safe to delete; old comments lose their images.\n' "$BRANCH" > README.md
+            git add README.md
+          fi
+          mkdir -p "$dest" && cp "$OUT"/plots/*.png "$dest"/
+          git add "$dest" && git commit -q -m "Criterion plots for $dest"
+          if git push -q origin "HEAD:refs/heads/$BRANCH"; then
+            echo "image-base=https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$(git rev-parse HEAD)/$dest" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Another run pushed first; start again from its tip.
+          git reset -q --hard && git checkout -q --detach && git branch -q -D "$BRANCH" || true
+          sleep $((attempt * 3))
+        done
+        echo "::warning::Could not push plots to '$BRANCH' (fork PR, or the job lacks contents: write). Posting tables only."
+        exit 1
+
+    - name: Write report
+      shell: bash
+      env:
+        CRITERION_HOME: ${{ steps.prep.outputs.criterion-home }}
+        OUT: ${{ steps.prep.outputs.out }}
+        THRESHOLD: ${{ inputs.threshold }}
+        TITLE: ${{ steps.prep.outputs.title }}
+        IMAGE_BASE: ${{ steps.publish.outputs.image-base }}
+        PLOTS: ${{ steps.render.outputs.plots }}
+        BASE_OK: ${{ steps.base.outcome }}
+        BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        SLUG: ${{ steps.prep.outputs.slug }}
+      run: |
+        run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+        footer="<sub>"
+        [ -n "$BASE_SHA" ] && footer+="base ${BASE_SHA::7} → "
+        footer+="head ${HEAD_SHA::7} · [workflow run]($run_url) · HTML report: \`criterion-$SLUG\` artifact · <a href=\"https://github.com/ucgmsim/meta-ci-action/tree/main/criterion-bench\">criterion-bench</a></sub>"
+        if [ "$BASE_OK" = "failure" ]; then
+          footer="> [!CAUTION]
+        > The base branch benchmarks failed to build or run, so nothing could be compared. See the workflow run.
+
+        $footer"
+        fi
+        footer="$footer
+        <!-- criterion-bench:$SLUG -->"
+        uv run --no-project --python 3.13 --with 'numpy>=2' \
+          python -I "$GITHUB_ACTION_PATH/report.py" markdown \
+          --criterion-dir "$CRITERION_HOME" --threshold "$THRESHOLD" \
+          --title "$TITLE" --image-base "$IMAGE_BASE" --plots "$PLOTS" \
+          --footer "$footer" > "$OUT/comment.md"
+        cat "$OUT/comment.md" >> "$GITHUB_STEP_SUMMARY"
+
+    - name: Upload criterion report
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: criterion-${{ steps.prep.outputs.slug }}
+        path: |
+          ${{ steps.prep.outputs.criterion-home }}
+          ${{ steps.prep.outputs.out }}
+        if-no-files-found: ignore
+
+    - name: Comment on PR
+      if: inputs.comment == 'true' && github.event.pull_request.number
+      continue-on-error: true
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        PR: ${{ github.event.pull_request.number }}
+        OUT: ${{ steps.prep.outputs.out }}
+        MARKER: "<!-- criterion-bench:${{ steps.prep.outputs.slug }} -->"
+      run: |
+        id=$(gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$PR/comments" \
+          --jq ".[] | select(.body | contains(\"$MARKER\")) | .id" | tail -n1)
+        if [ -n "$id" ]; then
+          gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$id" -F body=@"$OUT/comment.md" > /dev/null
+          echo "Updated comment $id"
+        else
+          gh api -X POST "repos/$GITHUB_REPOSITORY/issues/$PR/comments" -F body=@"$OUT/comment.md" > /dev/null
+          echo "Posted a new comment"
+        fi
+
+    - name: Gate on regressions
+      if: inputs.fail-on-regression == 'true' && steps.render.outputs.regressions != '0'
+      shell: bash
+      env:
+        N: ${{ steps.render.outputs.regressions }}
+      run: |
+        echo "::error::$N benchmark(s) regressed beyond the threshold."
+        exit 1
