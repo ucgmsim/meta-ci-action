@@ -12,6 +12,9 @@ Shared, reusable GitHub Actions workflows for `ucgmsim` Python repos:
   **`ai-test-improver.yml`** — scheduled Claude jobs: file vetted issues, fix
   them (and any a maintainer labels `ai-ok`), and add tests that kill surviving
   mutants. See [Usage: scheduled AI jobs](#usage-scheduled-ai-jobs).
+- **`criterion-bench/`** — a composite action that runs a crate's criterion
+  benches on a PR's base and head and posts a comment with a results table and
+  plotted timing distributions. See [criterion-bench/README.md](criterion-bench/README.md).
 - **`build-dist.yml`** — builds a release's sdist and wheels (one pure wheel,
   or a `cibuildwheel` matrix for repos with a `Cargo.toml`) as a single
   artifact, for the caller's PyPI publish job to upload.
