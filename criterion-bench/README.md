@@ -59,6 +59,7 @@ writes the table and plots to the job summary.
 | `system-packages` | | apt packages to install first. |
 | `fail-on-regression` | `false` | Fail the job when anything is slower beyond the threshold. |
 | `plots-branch` | `criterion-plots` | Orphan branch the PNGs go to; `''` posts tables only. |
+| `plots-retention-days` | `30` | Days a closed PR's plots are kept before being pruned. |
 | `comment` | `true` | Post/update the sticky PR comment. |
 | `title` | | Comment heading. |
 
@@ -72,8 +73,16 @@ Outputs: `regressions`, `improvements` (counts).
    `CRITERION_HOME`.
 2. `report.py plots` reads criterion's JSON output and renders PNGs;
    `report.py markdown` writes the comment.
-3. PNGs are committed to the `criterion-plots` branch and linked by commit SHA
-   (comments cannot carry image attachments through the API).
+3. PNGs are pushed to the `criterion-plots` branch (comments cannot carry
+   image attachments through the API) by `publish-plots.sh`, which also keeps
+   that branch small without any extra job in the caller:
+   - the comment is edited in place, so it only ever shows its newest run;
+     earlier runs' plots for the same PR and package are deleted;
+   - plots of PRs closed more than `plots-retention-days` ago are deleted;
+   - the branch is force-pushed as a single parentless commit, so deleted
+     PNGs become unreachable and are garbage-collected rather than piling up
+     in history. Images are therefore linked by branch and path (each run
+     writes a fresh path, so caches never serve stale plots).
 4. The comment is found by a hidden marker and edited in place.
 5. Criterion's own HTML report is uploaded as the `criterion-<dir>` artifact.
 

@@ -30,6 +30,9 @@ inputs:
   plots-branch:
     description: "Orphan branch the plot PNGs are committed to, so the comment can embed them. Needs 'contents: write'. Set to '' to skip images and post tables only."
     default: "criterion-plots"
+  plots-retention-days:
+    description: "Days to keep a closed PR's plots on the plots branch before pruning them (its comment then shows no images). Only the newest run's plots per PR are ever kept, and the branch is rewritten as a single commit, so it does not grow with every run."
+    default: "30"
   comment:
     description: "Post (or update) a sticky PR comment. Needs 'pull-requests: write'."
     default: "true"
@@ -189,8 +192,8 @@ runs:
         echo "improvements=$(jq .counts.faster "$OUT/plots/summary.json")" >> "$GITHUB_OUTPUT"
 
     # GitHub comments cannot carry image attachments through the API, so the
-    # PNGs are committed to an orphan branch and linked by commit SHA, which
-    # keeps old comments' images intact when later runs push more.
+    # PNGs go on an orphan branch. publish-plots.sh also prunes plots no
+    # comment can still show and keeps that branch to a single commit.
     - name: Publish plots
       id: publish
       if: inputs.plots-branch != '' && steps.render.outputs.plots != ''
@@ -199,36 +202,11 @@ runs:
       env:
         GH_TOKEN: ${{ inputs.github-token }}
         BRANCH: ${{ inputs.plots-branch }}
-        OUT: ${{ steps.prep.outputs.out }}
+        PLOTS_DIR: ${{ steps.prep.outputs.out }}/plots
         SLUG: ${{ steps.prep.outputs.slug }}
         PR: ${{ github.event.pull_request.number }}
-      run: |
-        dest="${PR:+pr-$PR}"; dest="${dest:-$GITHUB_REF_NAME}/$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT/$SLUG"
-        repo_dir="$RUNNER_TEMP/criterion-plots-repo"
-        rm -rf "$repo_dir" && git init -q "$repo_dir" && cd "$repo_dir"
-        git config user.name "github-actions[bot]"
-        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-        git remote add origin "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-        for attempt in 1 2 3 4 5; do
-          if git fetch -q --depth=1 origin "$BRANCH"; then
-            git checkout -q -B "$BRANCH" FETCH_HEAD
-          else
-            git checkout -q --orphan "$BRANCH"
-            printf '# %s\n\nPlots for criterion benchmark PR comments, written by\nucgmsim/meta-ci-action/criterion-bench. Safe to delete; old comments lose their images.\n' "$BRANCH" > README.md
-            git add README.md
-          fi
-          mkdir -p "$dest" && cp "$OUT"/plots/*.png "$dest"/
-          git add "$dest" && git commit -q -m "Criterion plots for $dest"
-          if git push -q origin "HEAD:refs/heads/$BRANCH"; then
-            echo "image-base=https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$(git rev-parse HEAD)/$dest" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          # Another run pushed first; start again from its tip.
-          git reset -q --hard && git checkout -q --detach && git branch -q -D "$BRANCH" || true
-          sleep $((attempt * 3))
-        done
-        echo "::warning::Could not push plots to '$BRANCH' (fork PR, or the job lacks contents: write). Posting tables only."
-        exit 1
+        RETENTION_DAYS: ${{ inputs.plots-retention-days }}
+      run: bash "$GITHUB_ACTION_PATH/publish-plots.sh"
 
     - name: Write report
       shell: bash
