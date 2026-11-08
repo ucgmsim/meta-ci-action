@@ -301,8 +301,8 @@ is what checks them.
 
 | Workflow | When | What Claude does |
 |---|---|---|
-| `ai-issue-generator.yml` | Sundays | Reviews ~2,500 lines the recent `ai-suggested` issues didn't cover and files up to 5 vetted issues (`ai-suggested`; `ai-serious`, assigned to the reviewer, for a serious bug), all labelled `ai-ok` so the solver attempts them. Close the PR and the issue to turn one down. It checks open and closed issues first, so it doesn't raise anything again. |
-| `ai-issue-solver.yml` | Daily | Opens a PR (`ai/issue-<n>`) for each of the 3 oldest open `ai-ok` issues that a **maintainer** labelled or the AI jobs filed themselves (anyone else's label is ignored, as is an issue that already has an open PR closing it; only the maintainers' and the bots' comments reach Claude): a failing test first, then the fix. It first checks the issue wasn't raised before and closed. Giving up, it comments why and swaps `ai-ok` for `ai-stuck`; a run that ends with neither a PR nor a reason (turn limit, timeout) gets `ai-stuck` too, so it isn't retried every day, with a comment quoting Claude's last message and any tool calls it was refused. |
+| `ai-issue-generator.yml` | Sundays | Reviews ~2,500 lines the recent `ai-suggested` issues didn't cover and files up to 10 vetted issues (`ai-suggested`; `ai-serious`, assigned to the reviewer, for a serious bug). By default (`auto-ok: safe`) only the small, unambiguous ones are also labelled `ai-ok` so the solver attempts them; ones that leave a design or physics decision open wait for a maintainer to add `ai-ok`. Close the PR and the issue to turn one down. It checks open and closed issues first, so it doesn't raise anything again. |
+| `ai-issue-solver.yml` | Daily | Opens a PR (`ai/issue-<n>`) for each of the 3 oldest open `ai-ok` issues that a **maintainer** labelled or the AI jobs filed themselves (anyone else's label is ignored, as is an issue that already has an open PR closing it; only the maintainers' and the bots' comments reach Claude): a failing test first, then the fix. It first checks the issue wasn't raised before and closed. Giving up, it comments why and swaps `ai-ok` for `ai-stuck`; a run that ends with neither a PR nor a reason (turn limit, timeout) gets `ai-stuck` too, so it isn't retried every day. |
 | `ai-test-improver.yml` | Daily | Mutation-tests the source files with mutmut, starting from a different file each day, takes the first with 5 or more mutants that survive (or that no test runs), and opens one tests-only PR (`ai/tests`) that kills them and covers the file's uncovered lines. A bug it finds is filed as an `ai-ok` issue instead. Skips while an `ai-tests` PR is open. |
 
 Setup, once for the org:
@@ -382,7 +382,8 @@ And per workflow:
 
 | Workflow | Input | Default | Purpose |
 |---|---|---|---|
-| generator | `max-issues` | `5` | Most issues filed per run. |
+| generator | `max-issues` | `10` | Most issues filed per run. |
+| generator | `auto-ok` | `safe` | Which issues are filed `ai-ok`: `safe` (one clear fix, testable, no numerical change beyond the bug fix, no maintainer decision left open), `all`, or `none`. |
 | solver | `maintainers` | the team | Space-separated users whose `ai-ok` label counts. |
 | solver | `trusted-bots` | `"claude[bot] ucgmsim[bot]"` | Accounts the AI jobs file issues as; their `ai-ok` counts on issues they opened. |
 | solver | `max-issues` | `3` | Most issues attempted per run. |
