@@ -242,7 +242,8 @@ jobs:
             --allowedTools "Read,Edit,Write,Glob,Grep,Bash(uv run:*),Bash(cargo test:*),Bash(git:*),Bash(gh issue list:*),Bash(gh issue view:*),Bash(gh issue create:*),Bash(gh pr list:*),Bash(gh pr create:*)"
 
       # Claude's own output is hidden from the log; put its final message, and any tool
-      # calls the allowlist refused, in the job summary so a run that did nothing says why.
+      # calls the allowlist refused, in the job summary so a run that did nothing says why,
+      # and in the log too, as the API (`gh run view --log`) can't read job summaries.
       - name: Summarise Claude's run
         if: always() && steps.claude.outputs.execution_file != ''
         env:
@@ -252,4 +253,4 @@ jobs:
             | "### Claude: \(.subtype), \(.num_turns) turns, $\(.total_cost_usd * 100 | round / 100)\n\n\(.result // "(no final message)")\n"
               + (if (.permission_denials // []) == [] then "" else
                  "\nRefused tool calls:\n\n" + (.permission_denials | map("- \(.tool_name): `\(.tool_input | tojson | .[:200])`") | join("\n")) end)' \
-            "$LOG" >> "$GITHUB_STEP_SUMMARY"
+            "$LOG" | tee -a "$GITHUB_STEP_SUMMARY"
