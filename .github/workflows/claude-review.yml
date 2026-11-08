@@ -1,8 +1,18 @@
 name: Claude PR Review
 
-# Reusable workflow — the actual "@claude review" trigger lives in each
-# consuming repo's own thin wrapper (on: issue_comment), NOT here. This file
-# only runs when called via `uses:` from that wrapper.
+# Reusable workflow — the triggers live in each consuming repo's own thin
+# wrapper, NOT here. This file only runs when called via `uses:` from it:
+#
+#   on:
+#     issue_comment:            # "@claude review" on any PR, on demand
+#       types: [created]
+#     pull_request:             # automatic, once, when a human's PR is ready
+#       types: [opened, ready_for_review]
+#
+# The pull_request trigger reviews a PR when it is opened ready for review or
+# taken out of draft, not on every push. It skips drafts, PRs opened by bots
+# (Dependabot, the AI jobs) and PRs from forks, which get no secrets on that
+# event; "@claude review" still works on all of them.
 on:
   workflow_call:
     secrets:
@@ -11,13 +21,19 @@ on:
 
 jobs:
   review:
-    # Only PR comments, only when explicitly asked.
+    # A "@claude review" comment on a PR, or a human's same-repo PR that is
+    # ready for review.
     if: >
-      github.event.issue.pull_request &&
-      contains(github.event.comment.body, '@claude review')
-    # A second "@claude review" cancels the in-flight one instead of running both. 
+      (github.event_name == 'issue_comment' &&
+       github.event.issue.pull_request &&
+       contains(github.event.comment.body, '@claude review')) ||
+      (github.event_name == 'pull_request' &&
+       !github.event.pull_request.draft &&
+       github.event.pull_request.user.type == 'User' &&
+       github.event.pull_request.head.repo.full_name == github.repository)
+    # A second review request cancels the in-flight one instead of running both.
     concurrency:
-      group: claude-review-${{ github.event.issue.number }}
+      group: claude-review-${{ github.event.issue.number || github.event.pull_request.number }}
       cancel-in-progress: true
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -38,7 +54,7 @@ jobs:
           track_progress: true
           prompt: |
             REPO: ${{ github.repository }}
-            PR NUMBER: ${{ github.event.issue.number }}
+            PR NUMBER: ${{ github.event.issue.number || github.event.pull_request.number }}
 
             Review this pull request for correctness bugs: logic errors,
             security vulnerabilities, broken edge cases, and regressions.
