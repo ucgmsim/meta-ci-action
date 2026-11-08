@@ -6,8 +6,10 @@ Shared, reusable GitHub Actions workflows for `ucgmsim` Python repos:
   (numpydoc-style docstrings), `pytest`, and `ty` (type checking) as five
   parallel jobs, plus a `rust` job (`cargo fmt`/`clippy`/`test`) that only
   appears for repos containing a `Cargo.toml`.
-- **`claude-review.yml`** — an on-demand Claude PR review, triggered by a
-  `@claude review` comment (never automatically on PR open/push).
+- **`claude-review.yml`** — a Claude PR review, triggered by a
+  `@claude review` comment, and (if the caller listens for `pull_request`)
+  once automatically when a human's PR is opened ready for review or taken
+  out of draft. Never on push.
 - **`ai-issue-generator.yml`**, **`ai-issue-solver.yml`**,
   **`ai-test-improver.yml`** — scheduled Claude jobs: file vetted issues, fix
   them (and any a maintainer labels `ai-ok`), and add tests that kill surviving
@@ -188,7 +190,7 @@ Notes:
 
 `claude-review.yml` is a `workflow_call`-only reusable workflow — it has no
 trigger of its own. Each consuming repo needs its own thin wrapper carrying
-the actual `issue_comment` trigger, e.g. `.github/workflows/claude-review.yml`:
+the triggers, e.g. `.github/workflows/claude-review.yml`:
 
 ```yaml
 name: Claude PR Review
@@ -196,17 +198,28 @@ name: Claude PR Review
 on:
   issue_comment:
     types: [created]
+  pull_request:
+    types: [opened, ready_for_review]
 
 jobs:
   review:
-    uses: ucgmsim/meta-ci-action/.github/workflows/claude-review.yml@v1
+    uses: ucgmsim/meta-ci-action/.github/workflows/claude-review.yml@v2
     secrets:
       claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
 ```
 
-The reusable workflow itself gates on `contains(github.event.comment.body,
-'@claude review')` and only runs on PR comments — it does not run on PR
-creation, push, or any other event. `CLAUDE_CODE_OAUTH_TOKEN` must be set as
+The reusable workflow runs on:
+
+- a PR comment containing `@claude review`, on any PR (including forks and
+  drafts); and
+- `pull_request` `opened` / `ready_for_review`, only for a non-draft PR opened
+  by a human (not Dependabot or the AI jobs, which are `Bot` accounts) from a
+  branch of the same repo. Fork PRs get no secrets on `pull_request`, so they
+  are skipped rather than failing; comment `@claude review` on them instead.
+
+It never runs on push (`synchronize`): ask again with `@claude review` after
+changes. Leave out the `pull_request` trigger for on-demand reviews only.
+`CLAUDE_CODE_OAUTH_TOKEN` must be set as
 a secret in the consuming repo (or its org) and passed through explicitly,
 since reusable workflows don't inherit secrets automatically unless declared.
 
