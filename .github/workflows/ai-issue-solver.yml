@@ -191,7 +191,10 @@ jobs:
                pass). Don't refactor nearby code, rename things, reformat untouched lines, or
                change existing public signatures unless the issue asks for it. Match the
                surrounding style and docstring convention, and document anything new.
-            5. Run the tests: `${{ inputs.test-command }}`. They must pass. Run
+            5. Run the tests: `${{ inputs.test-command }}`. They must pass. If you changed
+               compiled code (Rust, C, Cython) that the Python tests import, rebuild it first
+               with `uv sync ${{ inputs.uv-extra-args }} --reinstall-package <package>`, or as
+               CLAUDE.md says. Run
                `uv run --no-sync ruff check` and `uv run --no-sync ruff format --check` on the
                files you changed too, if ruff is installed. The PR's CI runs the rest.
             6. Open the PR:
@@ -221,27 +224,46 @@ jobs:
           claude_args: |
             --model ${{ inputs.model }}
             --max-turns ${{ inputs.max-turns }}
-            --allowedTools "Read,Edit,Write,Glob,Grep,Bash(uv run:*),Bash(cargo test:*),Bash(cargo build:*),Bash(git:*),Bash(gh issue list:*),Bash(gh issue comment:*),Bash(gh issue edit:*),Bash(gh pr list:*),Bash(gh pr create:*)"
+            --allowedTools "Read,Edit,Write,Glob,Grep,Bash(uv run:*),Bash(uv sync:*),Bash(cargo test:*),Bash(cargo build:*),Bash(git:*),Bash(gh issue list:*),Bash(gh issue comment:*),Bash(gh issue edit:*),Bash(gh pr list:*),Bash(gh pr create:*)"
 
       # A run that ends with neither a PR nor `ai-stuck` (turn limit, timeout, a crash)
       # would leave the issue `ai-ok` and retry it every day. Park it as stuck instead.
+      # The comment quotes Claude's last message and any refused tool calls: Claude often
+      # explains itself there without commenting, and the job summary that also has them
+      # can't be read through the API.
       - name: Mark the issue stuck if Claude left no PR and no reason
         if: always() && inputs.issue == 0 && steps.claude.outcome != 'skipped'
         env:
           GH_TOKEN: ${{ github.token }}
           N: ${{ matrix.issue }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          LOG: ${{ steps.claude.outputs.execution_file }}
         run: |
           R=$GITHUB_REPOSITORY
           pr=$(gh pr list -R "$R" --head "ai/issue-$N" --state open --json url --jq '.[0].url // empty')
           stuck=$(gh issue view "$N" -R "$R" --json labels --jq 'any(.labels[]; .name == "ai-stuck")')
           if [ -z "$pr" ] && [ "$stuck" != true ]; then
-            gh issue comment "$N" -R "$R" --body "The AI issue solver stopped without opening a PR or giving a reason: $RUN_URL. Remove \`ai-stuck\` and re-add \`ai-ok\` to retry."
+            mkdir -p .ai
+            {
+              echo "The AI issue solver stopped without opening a PR or labelling the issue: $RUN_URL."
+              if [ -n "$LOG" ] && [ -s "$LOG" ]; then
+                jq -r '.[] | select(.type == "result")
+                  | "\nIt ended with \(.subtype) after \(.num_turns) turns. Its last message:\n\n"
+                    + ((.result // "(none)") | .[:4000] | split("\n") | map("> " + .) | join("\n"))
+                    + (if (.permission_denials // []) == [] then "" else
+                       "\n\nTool calls it was refused:\n\n" + (.permission_denials | map("- \(.tool_name): `\(.tool_input | tojson | .[:200] | gsub("`"; "\u0027"))`") | join("\n")) end)' \
+                  "$LOG" || true
+              fi
+              echo
+              echo "Remove \`ai-stuck\` and re-add \`ai-ok\` to retry."
+            } > .ai/stuck.md
+            gh issue comment "$N" -R "$R" --body-file .ai/stuck.md
             gh issue edit "$N" -R "$R" --remove-label ai-ok --add-label ai-stuck
           fi
 
       # Claude's own output is hidden from the log; put its final message, and any tool
-      # calls the allowlist refused, in the job summary so a run that did nothing says why.
+      # calls the allowlist refused, in the job summary so a run that did nothing says why,
+      # and in the log too, as the API (`gh run view --log`) can't read job summaries.
       - name: Summarise Claude's run
         if: always() && steps.claude.outputs.execution_file != ''
         env:
@@ -251,4 +273,4 @@ jobs:
             | "### Claude: \(.subtype), \(.num_turns) turns, $\(.total_cost_usd * 100 | round / 100)\n\n\(.result // "(no final message)")\n"
               + (if (.permission_denials // []) == [] then "" else
                  "\nRefused tool calls:\n\n" + (.permission_denials | map("- \(.tool_name): `\(.tool_input | tojson | .[:200])`") | join("\n")) end)' \
-            "$LOG" >> "$GITHUB_STEP_SUMMARY"
+            "$LOG" | tee -a "$GITHUB_STEP_SUMMARY"
