@@ -124,6 +124,7 @@ jobs:
           PYTEST_PATHS: ${{ inputs.pytest-paths }}
           MIN: ${{ inputs.min-mutants }}
           MINUTES: ${{ inputs.mutation-timeout-minutes }}
+          GIVE_UP_AFTER: 3
         run: |
           if grep -q '^\[tool.mutmut\]' pyproject.toml; then
             echo "::error::the repo has its own [tool.mutmut] config, which the test improver would clash with"
@@ -143,7 +144,7 @@ jobs:
           copy=$(git ls-files | cut -d/ -f1 | sort -u | jq -Rnc '[inputs | select(. != "")]')
           mutmut="uv run --no-sync --with mutmut mutmut"
           deadline=$(( $(date +%s) + MINUTES * 60 ))
-          tried=0 broken=0 target=
+          tried=0 broken=0 target= setup_broken=false
           while read -r f <&3; do
             left=$(( deadline - $(date +%s) ))
             if [ "$left" -lt 120 ]; then echo "out of time after $tried files"; break; fi
@@ -154,6 +155,15 @@ jobs:
             rm -rf mutants
             if ! timeout "$left" $mutmut run < /dev/null > .ai/mutmut-run.txt 2>&1; then
               echo "mutmut ended early on $f; its last lines:"; tail -5 .ai/mutmut-run.txt
+              # These mean the test suite fails under mutmut before any mutant is tried,
+              # whichever file is mutated (e.g. a test that only passes once per process:
+              # mutmut runs the suite twice). Trying the other files only burns the time limit.
+              if grep -qE '^(Failed to run clean test|failed to collect stats\. runner returned|Failed to collect list of tests)' .ai/mutmut-run.txt; then
+                echo "the tests that failed under mutmut:"
+                tr '\r' '\n' < .ai/mutmut-run.txt | grep -E '^(FAILED|ERROR) ' | head -20 || true
+                setup_broken=true
+                break
+              fi
             fi
             $mutmut results --all true > .ai/mutmut-results.txt 2>&1 || true
             # "no tests": no test even runs the mutated code.
@@ -161,6 +171,11 @@ jobs:
             grep -qP ':\s*(killed|survived|no tests|timeout|suspicious)$' .ai/mutmut-results.txt || broken=$((broken + 1))
             count=$(wc -l < .ai/survived.txt)
             echo "$f: $count surviving or untested mutants"
+            # Any other failure that checks nothing in the first few files is the setup too.
+            if [ "$broken" -eq "$tried" ] && [ "$tried" -ge "$GIVE_UP_AFTER" ]; then
+              echo "mutmut checked no mutants in the first $tried files; giving up"
+              break
+            fi
             if [ "$count" -ge "$MIN" ]; then
               target=$f
               head -25 .ai/survived.txt | while read -r m; do $mutmut show "$m" < /dev/null || true; echo; done > .ai/survivors.txt
@@ -169,6 +184,10 @@ jobs:
           done 3< .ai/order.txt
           mv .ai/pyproject.toml.orig pyproject.toml
           rm -rf mutants
+          if [ "$setup_broken" = true ]; then
+            echo "::error::the tests fail under mutmut before it tries any mutant (see 'Failed to run clean test' above); fix them in the repo, as it is the same for every file"
+            exit 1
+          fi
           if [ -z "$target" ]; then
             if [ "$tried" -gt 0 ] && [ "$broken" -eq "$tried" ]; then
               echo "::error::mutmut checked no mutants in any of the $tried files tried; see the output above"
