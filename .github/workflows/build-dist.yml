@@ -12,6 +12,10 @@ on:
         description: "Git ref (usually a tag) to check out and build. Empty means the ref that triggered the caller, i.e. the release tag on a 'release' event. Pass a workflow_dispatch 'tag_name' input straight through."
         type: string
         default: ""
+      working-directory:
+        description: "Subdirectory holding the package's pyproject.toml (and Cargo.toml), for a monorepo with more than one package. Leave as '.' for a single-package repo."
+        type: string
+        default: "."
       python-version:
         description: "Python version uv uses to run the build backend for the sdist (and, for pure-Python packages, the wheel). cibuildwheel picks its own interpreters from 'requires-python'."
         type: string
@@ -71,8 +75,10 @@ jobs:
           ref: ${{ inputs.ref || github.ref }}
       - id: cargo
         shell: bash
+        env:
+          WORKDIR: ${{ inputs.working-directory }}
         run: |
-          if [ -n "$(find . -name Cargo.toml -not -path './target/*' -print -quit)" ]; then
+          if [ -n "$(find "$WORKDIR" -name Cargo.toml -not -path '*/target/*' -print -quit)" ]; then
             echo "has-rust=true" >> "$GITHUB_OUTPUT"
           else
             echo "has-rust=false" >> "$GITHUB_OUTPUT"
@@ -95,6 +101,7 @@ jobs:
         with:
           python-version: ${{ inputs.python-version }}
       - name: uv build
+        working-directory: ${{ inputs.working-directory }}
         env:
           HAS_RUST: ${{ needs.detect.outputs.has-rust }}
         run: |
@@ -105,6 +112,7 @@ jobs:
           fi
       - name: Read the version off the sdist
         id: version
+        working-directory: ${{ inputs.working-directory }}
         # Sdist filenames are '<normalised_name>-<version>.tar.gz', and a
         # normalised version never contains '-', so it is the last field.
         run: |
@@ -113,7 +121,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ inputs.artifact-name }}-part-sdist
-          path: dist/
+          path: ${{ inputs.working-directory }}/dist/
           if-no-files-found: error
 
   # Platform wheels for packages with a Rust extension.
@@ -157,6 +165,9 @@ jobs:
             fi
           done
       - uses: pypa/cibuildwheel@v4.3.1
+        with:
+          # Wheels still land in ./wheelhouse at the repo root.
+          package-dir: ${{ inputs.working-directory }}
         env:
           # Linux wheels are built inside a manylinux container, not on the
           # runner, so Rust has to be installed there too. safe.directory is

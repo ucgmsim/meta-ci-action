@@ -288,6 +288,7 @@ for later jobs that need it (e.g. tagging a container image).
 | Input | Default | Purpose |
 |---|---|---|
 | `ref` | `""` | Ref to check out and build. Empty means the ref that triggered the caller (the release tag on `release`). Pass a `workflow_dispatch` `tag_name` straight through. |
+| `working-directory` | `"."` | Subdirectory holding the package's `pyproject.toml`/`Cargo.toml`, for a monorepo with more than one package. The artifact layout is unchanged. |
 | `python-version` | `"3.13"` | Interpreter `uv build` runs the build backend with. |
 | `artifact-name` | `"python-package-distributions"` | Name of the merged artifact; also the `artifact-name` output. |
 | `wheel-runners` | `'["ubuntu-latest", "macos-latest", "windows-latest"]'` | JSON list of runners for the cibuildwheel matrix. Crate repos only. |
