@@ -173,9 +173,17 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+      # pyo3 builds against the runner's system python3 here, and `cargo test`
+      # links that libpython into the test binaries. Key the cache on its
+      # version so a runner image that bumps Python doesn't restore artefacts
+      # linked against one that no longer exists (`unable to find library
+      # -lpython3.12`).
+      - id: python
+        run: echo "version=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')" >> "$GITHUB_OUTPUT"
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: ${{ inputs.working-directory }}
+          key: python${{ steps.python.outputs.version }}
       - if: inputs.system-packages != ''
         run: sudo apt-get update && sudo apt-get install -y ${{ inputs.system-packages }}
       - name: cargo fmt --check
